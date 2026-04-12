@@ -1,0 +1,28 @@
+{
+  "id": "unirig-process-extension",
+  "name": "UniRig Process Extension",
+  "type": "process",
+  "entry": "processor.py",
+  "version": "0.1.0",
+  "author": "DrHepa",
+  "description": "Upstream-native UniRig process scaffold for Modly workflows.",
+  "nodes": [
+    {
+      "id": "rig-mesh",
+      "name": "Rig Mesh",
+      "input": "mesh",
+      "output": "mesh",
+      "params_schema": [
+        {
+          "id": "seed",
+          "label": "Seed",
+          "type": "int",
+          "default": 12345,
+          "min": 0,
+          "max": 2147483647,
+          "tooltip": "Deterministic seed forwarded to the runtime pipeline."
+        }
+      ]
+    }
+  ]
+}

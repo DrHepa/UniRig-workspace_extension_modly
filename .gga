@@ -1,0 +1,3 @@
+PROVIDER=opencode
+RULES_FILE=AGENTS.md
+STRICT_MODE=false
