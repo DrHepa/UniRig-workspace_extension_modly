@@ -36,11 +36,34 @@ This repository makes support claims only when there is **validated evidence**.
 | Host | Repo posture | Claim |
 | --- | --- | --- |
 | Windows x86_64 | Pinned prebuilt path validated with real install, rig, export, and Blender verification. | **Validated** for the current pinned prebuilt workflow in this repo. |
-| Linux x86_64 | Pinned prebuilt-first posture is documented. | **Unvalidated** end-to-end in this repo. Do not treat as fully supported. |
-| Linux ARM64 | Extra preflight/source-build diagnostics exist. | **Experimental** and **unvalidated** for reproducible end-to-end success. |
+| Linux x86_64 | Pinned prebuilt-first posture is documented. | **Unvalidated end-to-end** in this repo. Do not treat as fully supported. |
+| Linux ARM64 | Staged non-Blender bringup documents what can be checked or advanced without claiming a full runtime port. | **Experimental** and **unvalidated**. The current path is `staged-source-build` for non-Blender bringup only, requires real system CUDA and real nvcc, keeps `torch_scatter`/`torch_cluster` on a source-build path, and treats `spconv` as import-ready only if verified by guarded `cumm -> spconv -> spconv.pytorch` import smoke. Any Blender smoke is **external Blender evidence only**, not wrapper readiness. Deferred bpy still blocks full runtime support. |
 | Anything else | No repo evidence. | Unsupported until validated evidence exists. |
 
 Validated Windows evidence for this repo means: install from GitHub, run the full Modly workspace flow through `RIG`, export the result, and open the merged output successfully in Blender. If you validate another host/runtime combination with the same level of evidence, update the docs accordingly. Until then, KEEP THE CLAIMS CONSERVATIVE.
+
+Background Blender smoke alone is NOT validation evidence and must not be presented as support for any host.
+
+Windows x86_64 remains validated for the current pinned prebuilt workflow in this repo.
+
+Linux ARM64 currently describes staged non-Blender bringup, not platform support. It expects Python 3.11, an NVIDIA GPU, real system CUDA, and real nvcc before the wrapper can even evaluate the source-build path. `torch_scatter` and `torch_cluster` remain source-build expectations. `spconv` becomes import-ready only if verified by guarded `cumm -> spconv -> spconv.pytorch` import smoke, and even that remains experimental and unvalidated evidence rather than platform support.
+
+For Linux ARM64 `bpy`, the repo records external Blender evidence only. `setup.py` can discover one Blender candidate deterministically, run a background smoke, and report `missing`, `discovered-incompatible`, `external-bpy-smoke-ready`, or `error` without claiming the wrapper runtime is ready. The known Blender Python 3.12 versus wrapper Python 3.11 mismatch is reported explicitly as a mismatch and stays `discovered-incompatible`.
+
+That means Linux ARM64 full runtime remains blocked even when background Blender smoke succeeds. External Blender evidence only is useful for diagnosis, but it does NOT mean wrapper readiness, runtime readiness, runtime validation, validated support, or a completed runtime port.
+
+For extract/merge, `context.venv_python` remains the default/fallback wrapper-owned path. This tranche records qualification evidence only.
+
+Qualification verdict language is conservative by design: `not-ready`, `candidate-with-known-risks`, and `ready-for-separate-defaulting-change` are tranche verdicts only. Even the strongest verdict is qualification evidence only for a separate defaulting decision.
+
+This change also documents an **optional Blender subprocess seam** that is **Linux ARM64-first**, **experimental**, and **non-default**. That seam is a narrow executable-boundary experiment for `extract-prepare`, `extract-skin`, and `merge`; it is distinct from wrapper runtime readiness and it is NOT a platform support claim.
+
+The artifacts are different on purpose:
+
+- `source_build.external_blender` records external Blender evidence such as discovery, incompatibility, or background smoke.
+- `source_build.executable_boundary.extract_merge` records separate executable-boundary proof for the optional seam.
+
+Even if executable-boundary proof exists, Linux ARM64 full runtime remains blocked. External Blender evidence and executable-boundary proof are useful diagnostics, but neither one means wrapper runtime readiness, runtime validation, validated support, or a completed runtime port. Seam/default-candidate evidence is only qualification evidence for a separate defaulting decision, not support. Broader runtime redesign stays deferred. This does not claim full runtime support.
 
 ## Runtime notes
 
