@@ -456,6 +456,7 @@ class ProcessorProtocolTests(unittest.TestCase):
         self.assertTrue(done[0]["result"]["filePath"].endswith("mesh_unirig.glb"))
 
     def test_processor_runs_real_runtime_pipeline_and_writes_sidecar(self) -> None:
+        original_input = self.input_mesh.read_bytes()
         result = self._run_processor({"input": {"filePath": str(self.input_mesh), "nodeId": "rig-mesh"}, "params": {"seed": 11}})
         self.assertEqual(result.returncode, 0, msg=result.stderr)
         messages = [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
@@ -471,7 +472,7 @@ class ProcessorProtocolTests(unittest.TestCase):
         self.assertEqual(len(done), 1)
         output_path = Path(done[0]["result"]["filePath"])
         self.assertTrue(output_path.exists())
-        self.assertNotEqual(output_path.read_bytes(), self.input_mesh.read_bytes())
+        self.assertNotEqual(output_path.read_bytes(), original_input)
 
         sidecar_path = output_path.with_name(f"{output_path.stem}.rigmeta.json")
         self.assertTrue(sidecar_path.exists())

@@ -68,6 +68,17 @@ def _runtime_host_os(context: RuntimeContext) -> str:
     return str((host or {}).get("os") or "").strip().lower()
 
 
+def _runtime_host_arch(context: RuntimeContext) -> str:
+    host = context.platform_policy.get("host") if isinstance(context.platform_policy, dict) else None
+    return str((host or {}).get("arch") or "").strip().lower()
+
+
+def _should_mirror_published_output_to_input(*, mesh_path: Path, context: RuntimeContext | None) -> bool:
+    if context is None:
+        return False
+    return _runtime_host_os(context) == "linux" and _runtime_host_arch(context) == "aarch64" and mesh_path.suffix.lower() == ".glb"
+
+
 def _export_prepared_glb(*, mesh_path: Path, run_dir: Path, context: RuntimeContext) -> Path:
     suffix = mesh_path.suffix.lower()
     if suffix not in CONVERTIBLE_INPUT_SUFFIXES and suffix not in WORKSPACE_GLB_NORMALIZE_SUFFIXES:
@@ -105,9 +116,11 @@ def derive_output_path(mesh_path: Path) -> Path:
     return mesh_path.with_name(f"{mesh_path.stem}_unirig.glb")
 
 
-def publish_output(source_path: Path, mesh_path: Path) -> Path:
+def publish_output(source_path: Path, mesh_path: Path, *, context: RuntimeContext | None = None) -> Path:
     output_path = derive_output_path(mesh_path)
-    shutil.copy2(source_path, output_path)
+    copy_file(source_path, output_path)
+    if _should_mirror_published_output_to_input(mesh_path=mesh_path, context=context):
+        copy_file(source_path, mesh_path)
     return output_path
 
 

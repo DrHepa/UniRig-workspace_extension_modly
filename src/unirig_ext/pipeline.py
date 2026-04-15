@@ -120,7 +120,7 @@ def _run_real_pipeline(
         log("running merge stage")
         _run_stage(plan[4], context=context, run_dir=run_dir)
         progress(92, "merge stage complete")
-        return io.publish_output(plan[4].success_path, mesh_path)
+        return io.publish_output(plan[4].success_path, mesh_path, context=context)
     finally:
         _cleanup_staged_files(*staged_files)
 

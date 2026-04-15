@@ -4954,9 +4954,11 @@ class SetupBootstrapTests(unittest.TestCase):
         self.assertEqual(result, 0)
         smoke_mock.assert_not_called()
         state = json.loads((self.ext_dir / ".unirig-runtime" / "bootstrap_state.json").read_text(encoding="utf-8"))
-        self.assertEqual(state["install_state"], "blocked")
+        self.assertEqual(state["install_state"], "partial")
         self.assertEqual(state["install_plan"]["summary"]["status"], "partial")
+        self.assertTrue(state["source_build"]["non_blender_runtime_ready"])
         self.assertEqual(state["source_build"]["stages"]["bpy"]["status"], "external-bpy-smoke-ready")
+        self.assertEqual(state["source_build"]["executable_boundary"]["extract_merge"]["status"], "verified")
 
     def test_main_windows_x86_64_ready_path_keeps_pinned_prebuilt_defaults_and_skips_linux_arm64_proof_logic(self) -> None:
         module = load_setup_module()
@@ -5053,7 +5055,76 @@ class SetupBootstrapTests(unittest.TestCase):
         self.assertEqual(proof_seed, {"seeded": False, "source": "", "reason": "no-compatible-backup-proofs"})
         self.assertFalse(module._linux_arm64_runtime_has_persisted_partial_proofs(runtime_root))
 
-    def test_main_partial_install_on_clean_linux_arm64_does_not_attempt_to_seed_runtime_proofs_before_writing_state(self) -> None:
+    def test_linux_arm64_state_source_build_payload_promotes_clean_partial_install_to_current_install_partial_mode(self) -> None:
+        module = load_setup_module()
+
+        planner = {
+            "host_class": "linux-arm64",
+            "install_mode": "staged-source-build",
+            "support_posture": "experimental-unvalidated",
+            "deferred": ["bpy-portability"],
+        }
+        preflight = {
+            "status": "blocked",
+            "host_class": "linux-arm64",
+            "support_posture": "experimental-unvalidated",
+            "blocked": ["Linux ARM64 has no validated prebuilt distribution path for this wrapper."],
+            "blockers": [],
+            "source_build": {
+                "status": "blocked",
+                "host_class": "linux-arm64",
+                "stages": {
+                    "baseline": {"status": "ready", "ready": True, "blockers": [], "blocker_codes": []},
+                    "pyg": {"status": "ready", "ready": True, "blockers": [], "blocker_codes": []},
+                    "spconv": {"status": "ready", "ready": True, "blockers": [], "blocker_codes": []},
+                },
+            },
+        }
+        install_result = {
+            "status": "partial",
+            "source_build": {
+                "status": "partial",
+                "host_class": "linux-arm64",
+                "stages": {
+                    "baseline": {"status": "ready", "ready": True, "blockers": [], "blocker_codes": []},
+                    "pyg": {"status": "ready", "ready": True, "blockers": [], "blocker_codes": []},
+                    "spconv": {"status": "ready", "ready": True, "blockers": [], "blocker_codes": []},
+                    "bpy": {"status": "external-bpy-smoke-ready", "ready": False, "blockers": [], "blocker_codes": []},
+                },
+                "external_blender": {
+                    "classification": {
+                        "status": "external-bpy-smoke-ready",
+                        "ready": False,
+                        "evidence_kind": "external-blender",
+                        "blockers": [],
+                        "blocker_codes": [],
+                    }
+                },
+            },
+            "deferred_work": ["bpy-portability"],
+            "blocked": [],
+        }
+
+        source_build = module._linux_arm64_state_source_build_payload(
+            preflight,
+            planner,
+            deferred_work=["bpy-portability"],
+            install_result=install_result,
+        )
+
+        self.assertEqual(source_build["status"], "partial")
+        self.assertTrue(source_build["non_blender_runtime_ready"])
+        self.assertEqual(source_build["executable_boundary"]["extract_merge"]["status"], "verified")
+        self.assertTrue(source_build["executable_boundary"]["extract_merge"]["enabled"])
+        self.assertTrue(source_build["executable_boundary"]["extract_merge"]["ready"])
+        self.assertEqual(
+            source_build["executable_boundary"]["extract_merge"]["supported_stages"],
+            ["extract-prepare", "skeleton", "extract-skin", "skin", "merge"],
+        )
+        self.assertEqual(source_build["executable_boundary"]["extract_merge"]["proof_kind"], "blender-subprocess")
+        self.assertEqual(source_build["executable_boundary"]["extract_merge"]["proof_source"], "current-install")
+
+    def test_main_partial_install_on_clean_linux_arm64_writes_current_install_partial_state_without_backup_seed(self) -> None:
         module = load_setup_module()
 
         def fake_prepare_runtime_source(ext_dir: Path, payload: dict) -> tuple[Path, str, str]:
@@ -5115,9 +5186,18 @@ class SetupBootstrapTests(unittest.TestCase):
         smoke_mock.assert_not_called()
         seed_mock.assert_not_called()
         state = json.loads((self.ext_dir / ".unirig-runtime" / "bootstrap_state.json").read_text(encoding="utf-8"))
-        self.assertEqual(state["install_state"], "blocked")
+        self.assertEqual(state["install_state"], "partial")
         self.assertEqual(state["install_plan"]["summary"]["status"], "partial")
+        self.assertTrue(state["source_build"]["non_blender_runtime_ready"])
         self.assertEqual(state["source_build"]["stages"]["bpy"]["status"], "external-bpy-smoke-ready")
+        self.assertEqual(state["source_build"]["executable_boundary"]["extract_merge"]["status"], "verified")
+        self.assertTrue(state["source_build"]["executable_boundary"]["extract_merge"]["enabled"])
+        self.assertTrue(state["source_build"]["executable_boundary"]["extract_merge"]["ready"])
+        self.assertEqual(
+            state["source_build"]["executable_boundary"]["extract_merge"]["supported_stages"],
+            ["extract-prepare", "skeleton", "extract-skin", "skin", "merge"],
+        )
+        self.assertEqual(state["source_build"]["executable_boundary"]["extract_merge"]["proof_source"], "current-install")
 
     def test_bootstrap_requires_prepared_state(self) -> None:
         with self.assertRaises(bootstrap.BootstrapError):

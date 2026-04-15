@@ -437,6 +437,50 @@ def _linux_arm64_extract_merge_boundary_payload(source_build: dict[str, object] 
     return boundary
 
 
+def _linux_arm64_stage_ready(payload: dict[str, object] | None, stage_name: str) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    stages = payload.get("stages") if isinstance(payload.get("stages"), dict) else {}
+    stage = stages.get(stage_name) if isinstance(stages.get(stage_name), dict) else {}
+    return bool(stage.get("ready"))
+
+
+def _promote_linux_arm64_current_install_partial_proof(source_build: dict[str, object]) -> dict[str, object]:
+    payload = _copy_jsonish_dict(source_build)
+    if str(payload.get("host_class") or "").strip() != "linux-arm64":
+        return payload
+    if str(payload.get("status") or "").strip() != "partial":
+        return payload
+
+    stages = payload.get("stages") if isinstance(payload.get("stages"), dict) else {}
+    bpy_stage = stages.get("bpy") if isinstance(stages.get("bpy"), dict) else {}
+    if str(bpy_stage.get("status") or "").strip() != "external-bpy-smoke-ready":
+        return payload
+    if not all(_linux_arm64_stage_ready(payload, stage_name) for stage_name in ("baseline", "pyg", "spconv")):
+        return payload
+
+    payload["non_blender_runtime_ready"] = True
+    payload["blockers"] = []
+    payload["blocked_reasons"] = []
+    extract_merge = _copy_jsonish_dict(
+        ((payload.get("executable_boundary") or {}).get("extract_merge"))
+        if isinstance((payload.get("executable_boundary") or {}).get("extract_merge"), dict)
+        else {}
+    )
+    extract_merge["enabled"] = True
+    extract_merge["ready"] = True
+    extract_merge["status"] = "verified"
+    extract_merge["proof_kind"] = "blender-subprocess"
+    extract_merge["proof_source"] = "current-install"
+    extract_merge.setdefault("default_owner", "context.venv_python")
+    extract_merge.setdefault("optional_owner", "blender-subprocess")
+    extract_merge["supported_stages"] = list(bootstrap.LINUX_ARM64_RECOVERED_STAGE_PROOF_NAMES)
+    boundary = _copy_jsonish_dict(payload.get("executable_boundary") if isinstance(payload.get("executable_boundary"), dict) else {})
+    boundary["extract_merge"] = extract_merge
+    payload["executable_boundary"] = boundary
+    return payload
+
+
 def _linux_arm64_runtime_stage_result_payloads(runtime_root: Path) -> list[tuple[Path, dict[str, object]]]:
     payloads: list[tuple[Path, dict[str, object]]] = []
     runs_root = runtime_root / "runs"
@@ -3721,6 +3765,7 @@ def _linux_arm64_state_source_build_payload(
         payload.setdefault("external_blender", {})
         if isinstance(payload["external_blender"], dict):
             payload["external_blender"].setdefault("classification", _copy_jsonish_dict(bpy_stage))
+    payload = _promote_linux_arm64_current_install_partial_proof(payload)
     payload["executable_boundary"] = _linux_arm64_extract_merge_boundary_payload(payload)
     return payload
 
