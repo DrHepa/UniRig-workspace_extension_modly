@@ -10,6 +10,57 @@ ARCHITECTURE = ROOT / "docs" / "architecture.md"
 
 
 class DocsContractTests(unittest.TestCase):
+    def test_docs_describe_stable_event_types_with_optional_liveness_metadata(self) -> None:
+        readme = README.read_text(encoding="utf-8").lower()
+        architecture = ARCHITECTURE.read_text(encoding="utf-8").lower()
+
+        for document in (readme, architecture):
+            self.assertIn("progress", document)
+            self.assertIn("log", document)
+            self.assertIn("done", document)
+            self.assertIn("error", document)
+            self.assertIn("optional metadata", document)
+            self.assertIn("stage", document)
+            self.assertIn("kind", document)
+            self.assertIn("status", document)
+            self.assertIn("elapsedseconds", document)
+            self.assertIn("no stdout/stderr streaming", document)
+
+    def test_architecture_doc_names_the_contract_tests_that_lock_liveness_behavior(self) -> None:
+        architecture = ARCHITECTURE.read_text(encoding="utf-8").lower()
+
+        self.assertIn("tests/test_processor_protocol.py", architecture)
+        self.assertIn("tests/test_docs_contract.py", architecture)
+        self.assertIn("public protocol", architecture)
+        self.assertIn("docs contract", architecture)
+
+    def test_readme_documents_workspace_publication_contract(self) -> None:
+        readme = README.read_text(encoding="utf-8").lower()
+
+        self.assertIn("workspacedir", readme)
+        self.assertIn("tempdir", readme)
+        self.assertIn("workflows", readme)
+        self.assertIn("canonical", readme)
+        self.assertIn("add to scene", readme)
+        self.assertIn("fallback", readme)
+        self.assertIn("input", readme)
+        self.assertIn("linux arm64", readme)
+        self.assertIn("secondary", readme)
+
+    def test_architecture_documents_workspace_publication_flow(self) -> None:
+        architecture = ARCHITECTURE.read_text(encoding="utf-8").lower()
+
+        self.assertIn("workspacedir", architecture)
+        self.assertIn("tempdir", architecture)
+        self.assertIn("workflows", architecture)
+        self.assertIn("canonical", architecture)
+        self.assertIn("done.result.filepath", architecture)
+        self.assertIn("add to scene", architecture)
+        self.assertIn("fallback", architecture)
+        self.assertIn("input", architecture)
+        self.assertIn("linux arm64", architecture)
+        self.assertIn("secondary", architecture)
+
     def test_docs_frame_linux_arm64_extract_merge_as_qualification_only(self) -> None:
         readme = README.read_text(encoding="utf-8")
         architecture = ARCHITECTURE.read_text(encoding="utf-8")

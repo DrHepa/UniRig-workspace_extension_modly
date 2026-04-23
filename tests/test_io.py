@@ -146,6 +146,38 @@ class PublishOutputTests(unittest.TestCase):
         self.assertEqual(published.read_bytes(), b"rigged-output")
         self.assertEqual(mesh_path.read_bytes(), b"original-input")
 
+    def test_publish_output_publishes_canonical_file_inside_workspace_workflows(self) -> None:
+        mesh_path = self.temp_dir / "Descargas" / "avatar.glb"
+        mesh_path.parent.mkdir(parents=True, exist_ok=True)
+        mesh_path.write_bytes(b"original-input")
+        workspace_dir = self.temp_dir / "workspace"
+
+        published = io.publish_output(
+            self.source_path,
+            mesh_path,
+            context=self._context(host_os="linux", host_arch="x86_64"),
+            workspace_dir=workspace_dir,
+        )
+
+        self.assertEqual(published, workspace_dir / "Workflows" / "avatar_unirig.glb")
+        self.assertEqual(published.read_bytes(), b"rigged-output")
+        self.assertFalse((mesh_path.parent / "avatar_unirig.glb").exists())
+
+    def test_publish_output_keeps_legacy_fallback_when_no_explicit_destination_exists(self) -> None:
+        mesh_path = self.temp_dir / "Descargas" / "avatar.glb"
+        mesh_path.parent.mkdir(parents=True, exist_ok=True)
+        mesh_path.write_bytes(b"original-input")
+
+        published = io.publish_output(
+            self.source_path,
+            mesh_path,
+            context=self._context(host_os="linux", host_arch="x86_64"),
+        )
+
+        self.assertEqual(published, mesh_path.parent / "avatar_unirig.glb")
+        self.assertEqual(published.read_bytes(), b"rigged-output")
+        self.assertEqual(mesh_path.read_bytes(), b"original-input")
+
     def test_publish_output_mirrors_linux_arm64_glb_back_to_input_path(self) -> None:
         mesh_path = self.temp_dir / "avatar.glb"
         mesh_path.write_bytes(b"original-input")
@@ -155,6 +187,41 @@ class PublishOutputTests(unittest.TestCase):
         self.assertEqual(published, self.temp_dir / "avatar_unirig.glb")
         self.assertEqual(published.read_bytes(), b"rigged-output")
         self.assertEqual(mesh_path.read_bytes(), b"rigged-output")
+
+    def test_publish_output_raises_actionable_error_when_explicit_destination_copy_fails(self) -> None:
+        mesh_path = self.temp_dir / "Descargas" / "avatar.glb"
+        mesh_path.parent.mkdir(parents=True, exist_ok=True)
+        mesh_path.write_bytes(b"original-input")
+        workspace_dir = self.temp_dir / "workspace"
+
+        with mock.patch("unirig_ext.io.shutil.copy2", side_effect=PermissionError("handoff denied")):
+            with self.assertRaisesRegex(Exception, "workspace"):
+                io.publish_output(
+                    self.source_path,
+                    mesh_path,
+                    context=self._context(host_os="linux", host_arch="x86_64"),
+                    workspace_dir=workspace_dir,
+                )
+
+        self.assertFalse((mesh_path.parent / "avatar_unirig.glb").exists())
+
+    def test_publish_output_keeps_workspace_canonical_on_linux_arm64(self) -> None:
+        mesh_path = self.temp_dir / "Descargas" / "avatar.glb"
+        mesh_path.parent.mkdir(parents=True, exist_ok=True)
+        mesh_path.write_bytes(b"original-input")
+        workspace_dir = self.temp_dir / "workspace"
+
+        published = io.publish_output(
+            self.source_path,
+            mesh_path,
+            context=self._context(host_os="linux", host_arch="aarch64"),
+            workspace_dir=workspace_dir,
+        )
+
+        self.assertEqual(published, workspace_dir / "Workflows" / "avatar_unirig.glb")
+        self.assertEqual(published.read_bytes(), b"rigged-output")
+        self.assertEqual(mesh_path.read_bytes(), b"rigged-output")
+        self.assertFalse((mesh_path.parent / "avatar_unirig.glb").exists())
 
 
 if __name__ == "__main__":

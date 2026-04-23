@@ -15,9 +15,22 @@ Everything else is **upstream-first**: the wrapper stages a pinned UniRig checko
 ## What stays stable
 
 - node id: `rig-mesh`
-- stdin payload: `input.filePath`, `input.nodeId`, optional `params.seed`
+- stdin payload: `input.filePath`, `input.nodeId`, optional `params.seed`, plus top-level host workspace fields such as `workspaceDir` / `tempDir`
 - stdout event types: `progress`, `log`, `done`, `error`
+- `log` / `progress` may carry optional metadata (`stage`, `kind`, `status`, `elapsedSeconds`) for minimal liveness without changing event types
 - success result shape: `{"filePath": "..._unirig.glb"}`
+
+Minimal liveness stays backward-compatible: the wrapper reports stage starts and long-stage heartbeats through the existing `log` / `progress` events, and there is **no stdout/stderr streaming** on the public stream.
+
+## Workspace publication contract
+
+For Modly `process` extensions, the host may provide top-level `workspaceDir` / `tempDir` fields. UniRig treats `workspaceDir` as the canonical publication target when it is present, non-empty, and already exists on disk.
+
+- The canonical workflow output is published to `workspaceDir/Workflows/<input-stem>_unirig.glb`.
+- The `.rigmeta.json` sidecar is written beside that canonical file.
+- `done.result.filePath` points to that canonical workspace artifact so Modly `Add to Scene` treats it as workflow output.
+- If `workspaceDir` is missing, empty, or does not exist, the wrapper keeps the compatible fallback and derives the output path from `input.filePath`.
+- On Linux ARM64, any compatibility mirror back onto the original input path is secondary only; it is NOT the canonical output and does not replace the workspace `done.result.filePath`.
 
 ## Install and repair
 

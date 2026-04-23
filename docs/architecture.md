@@ -9,10 +9,14 @@ This repository is a **thin wrapper** that preserves Modly's public process boun
 1. `manifest.json` and `processor.py` keep the public Modly contract stable.
 2. `setup.py` acts as the wrapper's **planner/executor** for deterministic upstream staging, host-aware install planning, venv creation, preflight reporting, and readiness persistence.
 3. `bootstrap.ensure_ready()` verifies the staged runtime and returns actionable failures.
-4. `pipeline.run()` adapts Modly inputs to one deterministic upstream execution path.
+4. `pipeline.run()` adapts Modly inputs to one deterministic upstream execution path and emits minimal liveness through existing `log` / `progress` events.
 5. `metadata.write_sidecar()` writes the stable `.rigmeta.json` handoff beside the published mesh.
 
 This is an **upstream-first** design: the wrapper does not own a second rigging policy engine.
+
+The public JSON-line contract stays limited to `progress`, `log`, `done`, and `error`. For backward-compatible liveness, `log` / `progress` may include optional metadata fields `stage`, `kind`, `status`, and `elapsedSeconds`; there is **no stdout/stderr streaming** on the public stream.
+
+At the process boundary, Modly may send top-level `workspaceDir` / `tempDir` fields to public `process` extensions. This wrapper currently uses `workspaceDir` as the canonical publication target when it is present, non-empty, and exists on disk; `tempDir` remains host/runtime context, not the published workflow destination.
 
 ## Planner and runtime-state split
 
@@ -69,11 +73,19 @@ The wrapper may explain which boundary failed, but it must not hide an environme
 ## Runtime flow
 
 1. Modly validates root `manifest.json` and launches `processor.py`.
-2. `processor.py` validates the request and calls `bootstrap.ensure_ready()`.
+2. `processor.py` validates the request, reads `input.filePath` plus top-level `workspaceDir` / `tempDir`, and calls `bootstrap.ensure_ready()`.
 3. `setup.py`/bootstrap guarantee the pinned upstream runtime is staged under `.unirig-runtime/vendor/unirig/`.
 4. `pipeline.run()` prepares deterministic input/output paths.
 5. Upstream UniRig commands perform extract → skeleton → skin → merge.
-6. The wrapper publishes `*_unirig.glb`, writes the sidecar, and emits Modly `done`.
+6. The wrapper publishes the canonical `*_unirig.glb` to `workspaceDir/Workflows/` when `workspaceDir` is usable, writes the sidecar beside that canonical file, and emits Modly `done` with `done.result.filePath` pointing at the workspace artifact so `Add to Scene` recognizes it as workflow output.
+7. If `workspaceDir` is missing, empty, or not present on disk, publication falls back to the deterministic source-derived path from `input.filePath` for compatibility.
+
+Canonical publication rules:
+
+- `workspaceDir/Workflows/<input-stem>_unirig.glb` is the primary published artifact when `workspaceDir` is available.
+- The sidecar lives beside the canonical published output, not beside the temporary run directory.
+- `done.result.filePath` must report the canonical published artifact, not an implementation-internal temp path.
+- On Linux ARM64, any mirror back onto the original input path is secondary compatibility behavior only; it does not change the canonical workspace artifact or the reported `done.result.filePath`.
 
 ## Repository layout
 
@@ -84,7 +96,7 @@ The wrapper may explain which boundary failed, but it must not hide an environme
 - `src/unirig_ext/pipeline.py` — deterministic upstream command adapter
 - `src/unirig_ext/io.py` — input validation, staging, and output publication
 - `src/unirig_ext/metadata.py` — sidecar writer with stable runtime facts only
-- `tests/` — contract, bootstrap, pipeline, and docs posture checks
+- `tests/` — public protocol checks in `tests/test_processor_protocol.py`, bootstrap/pipeline guardrails, and docs contract checks in `tests/test_docs_contract.py`
 
 ## Support posture
 

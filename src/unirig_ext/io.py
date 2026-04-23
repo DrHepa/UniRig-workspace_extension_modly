@@ -20,6 +20,10 @@ class InputValidationError(UniRigError):
     pass
 
 
+class OutputPublicationError(UniRigError):
+    pass
+
+
 def validate_mesh_input(mesh_path: Path) -> Path:
     mesh_path = Path(mesh_path).expanduser().resolve()
     if not mesh_path.exists():
@@ -116,9 +120,31 @@ def derive_output_path(mesh_path: Path) -> Path:
     return mesh_path.with_name(f"{mesh_path.stem}_unirig.glb")
 
 
-def publish_output(source_path: Path, mesh_path: Path, *, context: RuntimeContext | None = None) -> Path:
+def _derive_workspace_output_path(mesh_path: Path, workspace_dir: Path) -> Path:
+    return workspace_dir / "Workflows" / derive_output_path(mesh_path).name
+
+
+def publish_output(
+    source_path: Path,
+    mesh_path: Path,
+    *,
+    context: RuntimeContext | None = None,
+    workspace_dir: Path | None = None,
+) -> Path:
     output_path = derive_output_path(mesh_path)
-    copy_file(source_path, output_path)
+    if workspace_dir is not None:
+        output_path = _derive_workspace_output_path(mesh_path, workspace_dir)
+
+    try:
+        copy_file(source_path, output_path)
+    except OSError as exc:
+        if workspace_dir is not None:
+            raise OutputPublicationError(
+                "Failed to publish UniRig output into the workspace Workflows directory. "
+                f"workspaceDir={workspace_dir}; target={output_path}; error: {exc}"
+            ) from exc
+        raise
+
     if _should_mirror_published_output_to_input(mesh_path=mesh_path, context=context):
         copy_file(source_path, mesh_path)
     return output_path

@@ -9,9 +9,13 @@ import struct
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
+from contextlib import ExitStack
 from contextlib import nullcontext
 from pathlib import Path
+from typing import Callable
 from unittest import mock
 
 
@@ -416,6 +420,174 @@ class ProcessorProtocolTests(unittest.TestCase):
             "messages": [json.loads(line) for line in stdout_stream.getvalue().splitlines() if line.strip()],
         }
 
+    def _run_processor_inprocess_with_pipeline_patches(
+        self,
+        payload: dict,
+        *,
+        configure_pipeline: Callable[[object, ExitStack], None],
+        timeout_seconds: float | None = None,
+        **env_overrides: str,
+    ) -> dict:
+        stdout_stream = text_io.StringIO()
+        stderr_stream = text_io.StringIO()
+        stdin_stream = text_io.StringIO(json.dumps(payload) + "\n")
+        env = os.environ.copy()
+        env.update(env_overrides)
+
+        saved_modules = {
+            name: module
+            for name, module in list(sys.modules.items())
+            if name == "unirig_ext" or name.startswith("unirig_ext.")
+        }
+        for name in list(saved_modules):
+            sys.modules.pop(name, None)
+
+        copied_src = str(self.ext_dir / "src")
+        original_sys_path = list(sys.path)
+        sys.path.insert(0, copied_src)
+
+        try:
+            module_name = f"copied_processor_{id(self)}_{len(sys.modules)}_patched"
+            spec = importlib.util.spec_from_file_location(module_name, self.ext_dir / PROCESSOR.name)
+            assert spec is not None and spec.loader is not None
+            processor_module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(processor_module)
+            ready_context_patch = (
+                mock.patch.object(processor_module.bootstrap, "ensure_ready", return_value=self.ready_context)
+                if self.ready_context is not None
+                else nullcontext()
+            )
+
+            with ExitStack() as stack:
+                stack.enter_context(mock.patch.dict(os.environ, env, clear=True))
+                stack.enter_context(mock.patch("sys.stdin", stdin_stream))
+                stack.enter_context(mock.patch("sys.stdout", stdout_stream))
+                stack.enter_context(mock.patch("sys.stderr", stderr_stream))
+                stack.enter_context(ready_context_patch)
+                configure_pipeline(processor_module.pipeline, stack)
+                if timeout_seconds is None:
+                    exit_code = processor_module.main()
+                else:
+                    with mock.patch.object(processor_module.pipeline, "BLENDER_SUBPROCESS_TIMEOUT_SECONDS", timeout_seconds):
+                        exit_code = processor_module.main()
+        finally:
+            sys.path[:] = original_sys_path
+            for name in list(sys.modules):
+                if name == "unirig_ext" or name.startswith("unirig_ext."):
+                    sys.modules.pop(name, None)
+            sys.modules.update(saved_modules)
+
+        return {
+            "exit_code": exit_code,
+            "stdout": stdout_stream.getvalue(),
+            "stderr": stderr_stream.getvalue(),
+            "messages": [json.loads(line) for line in stdout_stream.getvalue().splitlines() if line.strip()],
+        }
+
+    def _log_messages(self, messages: list[dict]) -> list[str]:
+        return [message["message"] for message in messages if message["type"] == "log"]
+
+    def _stage_start_messages(self, messages: list[dict]) -> list[str]:
+        return [message for message in self._log_messages(messages) if message.startswith("running ")]
+
+    def _stage_heartbeat_messages(self, messages: list[dict], *, stage: str) -> list[str]:
+        prefix = f"{stage} stage still running"
+        return [message for message in self._log_messages(messages) if message.startswith(prefix)]
+
+    def _find_message(self, messages: list[dict], *, event_type: str, field: str, value: object) -> dict:
+        for message in messages:
+            if message.get("type") == event_type and message.get(field) == value:
+                return message
+        raise AssertionError(f"Missing {event_type} message with {field}={value!r}")
+
+    def _capture_files(self) -> list[Path]:
+        debug_dir = self.ext_dir / ".unirig-runtime" / "debug"
+        if not debug_dir.exists():
+            return []
+        return sorted(debug_dir.glob("request-capture-*.json"))
+
+    def _make_fake_stage_runner(
+        self,
+        *,
+        stage_durations: dict[str, float],
+        fail_stage: str | None = None,
+        failure_returncode: int = 1,
+    ) -> Callable[[object, ExitStack], None]:
+        clock = {"now": 0.0, "active_target": None}
+        condition = threading.Condition()
+
+        def fake_monotonic() -> float:
+            with condition:
+                return clock["now"]
+
+        def fake_sleep(seconds: float) -> None:
+            with condition:
+                target = clock["active_target"]
+                if target is None:
+                    clock["now"] += seconds
+                else:
+                    clock["now"] = min(target, clock["now"] + seconds)
+                condition.notify_all()
+            time.sleep(0)
+
+        def stage_name_for_command(command: list[str]) -> str:
+            rendered = " ".join(command)
+            if "src.data.extract" in rendered:
+                output_dir = next(item.split("=", 1)[1] for item in command if item.startswith("--output_dir="))
+                return "extract-skin" if "skin_npz" in output_dir else "extract-prepare"
+            if any(item.startswith("--task=") and "skeleton" in item for item in command):
+                return "skeleton"
+            if any(item.startswith("--task=") and "skin" in item for item in command):
+                return "skin"
+            if "src.inference.merge" in rendered:
+                return "merge"
+            raise AssertionError(f"Unsupported fake stage command: {command}")
+
+        def write_stage_output(stage: str, command: list[str]) -> None:
+            if stage.startswith("extract-"):
+                output_dir = Path(next(item.split("=", 1)[1] for item in command if item.startswith("--output_dir=")))
+                input_name = next(item.split("=", 1)[1] for item in command if item.startswith("--input="))
+                target = output_dir / Path(input_name).stem / pipeline.SKIN_DATA_NAME
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(f"npz::{stage}".encode("utf-8"))
+                return
+            output_path = Path(next(item.split("=", 1)[1] for item in command if item.startswith("--output=")))
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_bytes(f"ok::{stage}".encode("utf-8"))
+
+        def fake_run(
+            command: list[str],
+            *,
+            cwd: Path,
+            env: dict[str, str],
+            capture_output: bool,
+            text: bool,
+            check: bool,
+        ) -> subprocess.CompletedProcess[str]:
+            del cwd, env, capture_output, text, check
+            stage = stage_name_for_command(command)
+            duration = float(stage_durations.get(stage, 0.0))
+            target_time = fake_monotonic() + duration
+            with condition:
+                clock["active_target"] = target_time
+                advanced = condition.wait_for(lambda: clock["now"] >= target_time, timeout=0.1)
+                if not advanced:
+                    clock["now"] = target_time
+                clock["active_target"] = None
+                condition.notify_all()
+            if stage == fail_stage:
+                return subprocess.CompletedProcess(command, returncode=failure_returncode, stdout="private stdout", stderr="private stderr")
+            write_stage_output(stage, command)
+            return subprocess.CompletedProcess(command, returncode=0, stdout=f"ok::{stage}", stderr="")
+
+        def configure_pipeline(pipeline_module: object, stack: ExitStack) -> None:
+            stack.enter_context(mock.patch.object(pipeline_module.io, "prepare_input_mesh", side_effect=lambda staged_input, run_dir, context: staged_input))
+            stack.enter_context(mock.patch.object(pipeline_module, "_MONOTONIC", side_effect=fake_monotonic, create=True))
+            stack.enter_context(mock.patch.object(pipeline_module, "_SLEEP", side_effect=fake_sleep, create=True))
+            stack.enter_context(mock.patch.object(pipeline_module.subprocess, "run", side_effect=fake_run))
+
+        return configure_pipeline
+
     def _run_processor(self, payload: dict, **env_overrides: str) -> subprocess.CompletedProcess[str]:
         env = os.environ.copy()
         env.update(env_overrides)
@@ -480,6 +652,433 @@ class ProcessorProtocolTests(unittest.TestCase):
         self.assertEqual(sidecar["output_mesh"], output_path.name)
         self.assertEqual(sidecar["seed"], 11)
         self.assertEqual(sidecar["runtime"]["mode"], "real")
+
+    def test_processor_capture_request_disabled_keeps_public_protocol_unchanged(self) -> None:
+        def configure_pipeline(pipeline_module: object, stack: ExitStack) -> None:
+            def fake_run(*, mesh_path: Path, params: dict, context: RuntimeContext, progress: Callable, log: Callable, workspace_dir: Path | None = None) -> Path:
+                del mesh_path, params, context, progress, log, workspace_dir
+                output_path = self.temp_dir / "capture-disabled-output.glb"
+                output_path.write_bytes(b"glb")
+                return output_path
+
+            stack.enter_context(mock.patch.object(pipeline_module, "run", side_effect=fake_run))
+
+        result = self._run_processor_inprocess_with_pipeline_patches(
+            {"input": {"filePath": str(self.input_mesh), "nodeId": "rig-mesh"}, "params": {"seed": 41}},
+            configure_pipeline=configure_pipeline,
+        )
+
+        self.assertEqual(result["exit_code"], 0, msg=result["stderr"])
+        self.assertTrue(result["messages"], msg="processor emitted no protocol messages")
+        self.assertTrue({message["type"] for message in result["messages"]}.issubset({"progress", "log", "done", "error"}))
+        self.assertEqual(self._capture_files(), [])
+
+    def test_processor_capture_request_enabled_writes_full_payload_to_local_debug_file(self) -> None:
+        payload = {
+            "input": {"filePath": str(self.input_mesh), "nodeId": "rig-mesh"},
+            "params": {"seed": 43, "nested": {"mode": "probe"}},
+            "host": {"workspace": {"destination": "/tmp/handoff.glb"}},
+        }
+
+        def configure_pipeline(pipeline_module: object, stack: ExitStack) -> None:
+            def fake_run(*, mesh_path: Path, params: dict, context: RuntimeContext, progress: Callable, log: Callable, workspace_dir: Path | None = None) -> Path:
+                del mesh_path, params, context, progress, log, workspace_dir
+                output_path = self.temp_dir / "capture-enabled-output.glb"
+                output_path.write_bytes(b"glb")
+                return output_path
+
+            stack.enter_context(mock.patch.object(pipeline_module, "run", side_effect=fake_run))
+
+        result = self._run_processor_inprocess_with_pipeline_patches(
+            payload,
+            configure_pipeline=configure_pipeline,
+            UNIRIG_CAPTURE_REQUEST="1",
+        )
+
+        self.assertEqual(result["exit_code"], 0, msg=result["stderr"])
+        capture_files = self._capture_files()
+        self.assertEqual(len(capture_files), 1)
+        self.assertEqual(json.loads(capture_files[0].read_text(encoding="utf-8")), payload)
+
+    def test_processor_capture_request_enabled_does_not_contaminate_stdout_protocol(self) -> None:
+        payload = {
+            "input": {"filePath": str(self.input_mesh), "nodeId": "rig-mesh"},
+            "params": {"seed": 47},
+            "candidate": {"output_dir": "/tmp/host-probe"},
+        }
+
+        def configure_pipeline(pipeline_module: object, stack: ExitStack) -> None:
+            def fake_run(*, mesh_path: Path, params: dict, context: RuntimeContext, progress: Callable, log: Callable, workspace_dir: Path | None = None) -> Path:
+                del mesh_path, params, context, progress, log, workspace_dir
+                output_path = self.temp_dir / "capture-stdout-output.glb"
+                output_path.write_bytes(b"glb")
+                return output_path
+
+            stack.enter_context(mock.patch.object(pipeline_module, "run", side_effect=fake_run))
+
+        result = self._run_processor_inprocess_with_pipeline_patches(
+            payload,
+            configure_pipeline=configure_pipeline,
+            UNIRIG_CAPTURE_REQUEST="1",
+        )
+
+        self.assertEqual(result["exit_code"], 0, msg=result["stderr"])
+        self.assertTrue(result["stdout"].strip())
+        parsed_messages = [json.loads(line) for line in result["stdout"].splitlines() if line.strip()]
+        self.assertEqual(parsed_messages, result["messages"])
+        self.assertTrue({message["type"] for message in parsed_messages}.issubset({"progress", "log", "done", "error"}))
+        self.assertNotIn("request-capture-", result["stdout"])
+        self.assertNotIn("candidate", result["stdout"])
+
+    def test_processor_capture_request_write_failure_reports_actionable_error(self) -> None:
+        debug_path = self.ext_dir / ".unirig-runtime" / "debug"
+        debug_path.write_text("occupied", encoding="utf-8")
+
+        result = self._run_processor(
+            {"input": {"filePath": str(self.input_mesh), "nodeId": "rig-mesh"}, "params": {"seed": 53}},
+            UNIRIG_CAPTURE_REQUEST="1",
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        messages = [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
+        self.assertEqual(messages[-1]["type"], "error")
+        self.assertIn("Failed to capture processor request payload", messages[-1]["message"])
+        self.assertIn("UNIRIG_CAPTURE_REQUEST=1", messages[-1]["message"])
+        self.assertIn(str(debug_path), messages[-1]["message"])
+
+    def test_processor_publishes_done_result_inside_workspace_workflows_when_workspace_dir_is_provided(self) -> None:
+        source_mesh = self.temp_dir / "Descargas" / "avatar.glb"
+        source_mesh.parent.mkdir(parents=True, exist_ok=True)
+        write_minimal_valid_glb(source_mesh)
+        workspace_dir = self.temp_dir / "workspace"
+        workspace_dir.mkdir(parents=True, exist_ok=True)
+
+        result = self._run_processor(
+            {
+                "input": {"filePath": str(source_mesh), "nodeId": "rig-mesh"},
+                "params": {"seed": 11},
+                "workspaceDir": str(workspace_dir),
+            }
+        )
+
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        messages = [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
+        self.assertEqual(messages[-1]["type"], "done")
+        output_path = Path(messages[-1]["result"]["filePath"])
+        self.assertEqual(output_path, workspace_dir / "Workflows" / "avatar_unirig.glb")
+        self.assertTrue(output_path.exists())
+        self.assertFalse((source_mesh.parent / "avatar_unirig.glb").exists())
+
+        sidecar_path = output_path.with_name(f"{output_path.stem}.rigmeta.json")
+        self.assertTrue(sidecar_path.exists())
+
+    def test_processor_keeps_legacy_done_result_when_workspace_dir_is_missing_on_disk(self) -> None:
+        source_mesh = self.temp_dir / "Descargas" / "avatar.glb"
+        source_mesh.parent.mkdir(parents=True, exist_ok=True)
+        write_minimal_valid_glb(source_mesh)
+        workspace_dir = self.temp_dir / "workspace-missing"
+
+        result = self._run_processor(
+            {
+                "input": {"filePath": str(source_mesh), "nodeId": "rig-mesh"},
+                "params": {"seed": 13},
+                "workspaceDir": str(workspace_dir),
+            }
+        )
+
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        messages = [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
+        self.assertEqual(messages[-1]["type"], "done")
+        output_path = Path(messages[-1]["result"]["filePath"])
+        self.assertEqual(output_path, source_mesh.parent / "avatar_unirig.glb")
+        self.assertTrue(output_path.exists())
+
+    def test_processor_keeps_legacy_done_result_when_workspace_dir_is_empty_string(self) -> None:
+        source_mesh = self.temp_dir / "Descargas" / "avatar.glb"
+        source_mesh.parent.mkdir(parents=True, exist_ok=True)
+        write_minimal_valid_glb(source_mesh)
+
+        result = self._run_processor(
+            {
+                "input": {"filePath": str(source_mesh), "nodeId": "rig-mesh"},
+                "params": {"seed": 17},
+                "workspaceDir": "   ",
+            }
+        )
+
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        messages = [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
+        self.assertEqual(messages[-1]["type"], "done")
+        output_path = Path(messages[-1]["result"]["filePath"])
+        self.assertEqual(output_path, source_mesh.parent / "avatar_unirig.glb")
+        self.assertTrue(output_path.exists())
+
+    def test_processor_emits_error_without_done_when_workspace_publication_fails(self) -> None:
+        source_mesh = self.temp_dir / "Descargas" / "avatar.glb"
+        source_mesh.parent.mkdir(parents=True, exist_ok=True)
+        write_minimal_valid_glb(source_mesh)
+        workspace_dir = self.temp_dir / "workspace"
+        workspace_dir.mkdir(parents=True, exist_ok=True)
+
+        def configure_pipeline(pipeline_module: object, stack: ExitStack) -> None:
+            self._make_fake_stage_runner(
+                stage_durations={
+                    "extract-prepare": 0,
+                    "skeleton": 0,
+                    "extract-skin": 0,
+                    "skin": 0,
+                    "merge": 0,
+                }
+            )(pipeline_module, stack)
+            stack.enter_context(
+                mock.patch.object(
+                    pipeline_module.io,
+                    "copy_file",
+                    side_effect=PermissionError("workspace denied"),
+                )
+            )
+
+        result = self._run_processor_inprocess_with_pipeline_patches(
+            {
+                "input": {"filePath": str(source_mesh), "nodeId": "rig-mesh"},
+                "params": {"seed": 19},
+                "workspaceDir": str(workspace_dir),
+            },
+            configure_pipeline=configure_pipeline,
+        )
+
+        self.assertNotEqual(result["exit_code"], 0)
+        self.assertFalse(any(message["type"] == "done" for message in result["messages"]))
+        self.assertEqual(result["messages"][-1]["type"], "error")
+        self.assertIn("Failed to publish UniRig output into the workspace Workflows directory", result["messages"][-1]["message"])
+
+    def test_processor_keeps_workspace_result_canonical_for_linux_arm64_hosts(self) -> None:
+        trace_path = self.temp_dir / "fake-blender-arm64-workspace.jsonl"
+        blender_path = self._make_fake_blender_executable(trace_path=trace_path, scenario="success")
+        self._enable_linux_arm64_blender_seam(blender_path=blender_path)
+        source_mesh = self.temp_dir / "Descargas" / "avatar.glb"
+        source_mesh.parent.mkdir(parents=True, exist_ok=True)
+        write_minimal_valid_glb(source_mesh)
+        workspace_dir = self.temp_dir / "workspace"
+        workspace_dir.mkdir(parents=True, exist_ok=True)
+
+        result = self._run_processor_inprocess(
+            {
+                "input": {"filePath": str(source_mesh), "nodeId": "rig-mesh"},
+                "params": {"seed": 23},
+                "workspaceDir": str(workspace_dir),
+            }
+        )
+
+        self.assertEqual(result["exit_code"], 0, msg=result["stderr"])
+        messages = result["messages"]
+        self.assertEqual(messages[-1]["type"], "done")
+        output_path = Path(messages[-1]["result"]["filePath"])
+        self.assertEqual(output_path, workspace_dir / "Workflows" / "avatar_unirig.glb")
+        self.assertTrue(output_path.exists())
+        self.assertEqual(source_mesh.read_bytes(), output_path.read_bytes())
+        self.assertFalse((source_mesh.parent / "avatar_unirig.glb").exists())
+        self.assertTrue(trace_path.exists(), msg="fake Blender seam should execute on Linux ARM64 workspace runs")
+
+    def test_processor_exposes_canonical_stage_starts_in_order_without_new_event_types(self) -> None:
+        result = self._run_processor(
+            {"input": {"filePath": str(self.input_mesh), "nodeId": "rig-mesh"}, "params": {"seed": 21}}
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        messages = [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
+
+        self.assertEqual(
+            [
+                message["message"]
+                for message in messages
+                if message["type"] == "log" and message["message"].startswith("running ")
+            ],
+            [
+                "running extract-prepare stage",
+                "running skeleton stage",
+                "running extract-skin stage",
+                "running skin stage",
+                "running merge stage",
+            ],
+        )
+        self.assertTrue({message["type"] for message in messages}.issubset({"progress", "log", "done", "error"}))
+
+    def test_processor_emits_heartbeat_only_for_long_stages_after_ten_seconds(self) -> None:
+        result = self._run_processor_inprocess_with_pipeline_patches(
+            {"input": {"filePath": str(self.input_mesh), "nodeId": "rig-mesh"}, "params": {"seed": 23}},
+            configure_pipeline=self._make_fake_stage_runner(
+                stage_durations={
+                    "extract-prepare": 0,
+                    "skeleton": 1,
+                    "extract-skin": 0,
+                    "skin": 0,
+                    "merge": 21,
+                }
+            ),
+        )
+
+        self.assertEqual(result["exit_code"], 0, msg=result["stderr"])
+        messages = result["messages"]
+        self.assertEqual(
+            self._stage_start_messages(messages),
+            [
+                "running extract-prepare stage",
+                "running skeleton stage",
+                "running extract-skin stage",
+                "running skin stage",
+                "running merge stage",
+            ],
+        )
+        self.assertEqual(
+            self._stage_heartbeat_messages(messages, stage="merge"),
+            [
+                "merge stage still running (10s elapsed)",
+                "merge stage still running (20s elapsed)",
+            ],
+        )
+        self.assertEqual(self._stage_heartbeat_messages(messages, stage="skeleton"), [])
+        self.assertTrue({message["type"] for message in messages}.issubset({"progress", "log", "done", "error"}))
+
+    def test_processor_emits_successful_heartbeat_with_sanitized_public_payload(self) -> None:
+        result = self._run_processor_inprocess_with_pipeline_patches(
+            {"input": {"filePath": str(self.input_mesh), "nodeId": "rig-mesh"}, "params": {"seed": 27}},
+            configure_pipeline=self._make_fake_stage_runner(
+                stage_durations={
+                    "extract-prepare": 0,
+                    "skeleton": 0,
+                    "extract-skin": 11,
+                    "skin": 0,
+                    "merge": 0,
+                }
+            ),
+        )
+
+        self.assertEqual(result["exit_code"], 0, msg=result["stderr"])
+        messages = result["messages"]
+        heartbeat = self._find_message(
+            messages,
+            event_type="log",
+            field="message",
+            value="extract-skin stage still running (10s elapsed)",
+        )
+
+        self.assertEqual(heartbeat["stage"], "extract-skin")
+        self.assertEqual(heartbeat["kind"], "heartbeat")
+        self.assertEqual(heartbeat["status"], "running")
+        self.assertEqual(heartbeat["elapsedSeconds"], 10)
+        self.assertEqual(self._stage_heartbeat_messages(messages, stage="merge"), [])
+        self.assertEqual(messages[-1]["type"], "done")
+
+        public_stream = json.dumps(messages)
+        for forbidden in (
+            "run.py",
+            ".unirig-runtime",
+            "src.data.extract",
+            "src.inference.merge",
+            "private stdout",
+            "private stderr",
+            "ok::extract-skin",
+        ):
+            self.assertNotIn(forbidden, public_stream)
+
+    def test_processor_failure_exposes_only_attempted_stages_and_keeps_public_stream_sanitized(self) -> None:
+        result = self._run_processor_inprocess_with_pipeline_patches(
+            {"input": {"filePath": str(self.input_mesh), "nodeId": "rig-mesh"}, "params": {"seed": 29}},
+            configure_pipeline=self._make_fake_stage_runner(
+                stage_durations={
+                    "extract-prepare": 0,
+                    "skeleton": 0,
+                    "extract-skin": 0,
+                    "skin": 11,
+                },
+                fail_stage="skin",
+            ),
+        )
+
+        self.assertNotEqual(result["exit_code"], 0)
+        messages = result["messages"]
+        self.assertEqual(
+            self._stage_start_messages(messages),
+            [
+                "running extract-prepare stage",
+                "running skeleton stage",
+                "running extract-skin stage",
+                "running skin stage",
+            ],
+        )
+        self.assertEqual(self._stage_heartbeat_messages(messages, stage="skin"), ["skin stage still running (10s elapsed)"])
+        self.assertEqual(self._stage_heartbeat_messages(messages, stage="merge"), [])
+        self.assertEqual(messages[-1]["type"], "error")
+        self.assertIn("UniRig skin stage failed", messages[-1]["message"])
+
+        public_stream = json.dumps(messages)
+        for forbidden in ("run.py", ".unirig-runtime", "src.data.extract", "src.inference.merge", "private stdout", "private stderr"):
+            self.assertNotIn(forbidden, public_stream)
+
+    def test_processor_forwards_optional_log_liveness_metadata(self) -> None:
+        def configure_pipeline(pipeline_module: object, stack: ExitStack) -> None:
+            def fake_run(*, mesh_path: Path, params: dict, context: RuntimeContext, progress: Callable, log: Callable, workspace_dir: Path | None = None) -> Path:
+                del mesh_path, params, context, progress, workspace_dir
+                output_path = self.temp_dir / "metadata-log-output.glb"
+                output_path.write_bytes(b"glb")
+                log(
+                    "merge stage still running (10s elapsed)",
+                    stage="merge",
+                    kind="heartbeat",
+                    status="running",
+                    elapsedSeconds=10,
+                )
+                return output_path
+
+            stack.enter_context(mock.patch.object(pipeline_module, "run", side_effect=fake_run))
+
+        result = self._run_processor_inprocess_with_pipeline_patches(
+            {"input": {"filePath": str(self.input_mesh), "nodeId": "rig-mesh"}, "params": {"seed": 31}},
+            configure_pipeline=configure_pipeline,
+        )
+
+        self.assertEqual(result["exit_code"], 0, msg=result["stderr"])
+        heartbeat = self._find_message(
+            result["messages"],
+            event_type="log",
+            field="message",
+            value="merge stage still running (10s elapsed)",
+        )
+        self.assertEqual(heartbeat["stage"], "merge")
+        self.assertEqual(heartbeat["kind"], "heartbeat")
+        self.assertEqual(heartbeat["status"], "running")
+        self.assertEqual(heartbeat["elapsedSeconds"], 10)
+        self.assertTrue({message["type"] for message in result["messages"]}.issubset({"progress", "log", "done", "error"}))
+
+    def test_processor_progress_metadata_is_optional_and_backward_compatible(self) -> None:
+        def configure_pipeline(pipeline_module: object, stack: ExitStack) -> None:
+            def fake_run(*, mesh_path: Path, params: dict, context: RuntimeContext, progress: Callable, log: Callable, workspace_dir: Path | None = None) -> Path:
+                del mesh_path, params, context, log, workspace_dir
+                output_path = self.temp_dir / "metadata-progress-output.glb"
+                output_path.write_bytes(b"glb")
+                progress(12, "input validated")
+                progress(92, "merge stage complete", stage="merge", status="complete")
+                return output_path
+
+            stack.enter_context(mock.patch.object(pipeline_module, "run", side_effect=fake_run))
+
+        result = self._run_processor_inprocess_with_pipeline_patches(
+            {"input": {"filePath": str(self.input_mesh), "nodeId": "rig-mesh"}, "params": {"seed": 37}},
+            configure_pipeline=configure_pipeline,
+        )
+
+        self.assertEqual(result["exit_code"], 0, msg=result["stderr"])
+        baseline_progress = self._find_message(result["messages"], event_type="progress", field="label", value="input validated")
+        merge_progress = self._find_message(result["messages"], event_type="progress", field="label", value="merge stage complete")
+
+        self.assertNotIn("stage", baseline_progress)
+        self.assertNotIn("kind", baseline_progress)
+        self.assertNotIn("status", baseline_progress)
+        self.assertNotIn("elapsedSeconds", baseline_progress)
+        self.assertEqual(merge_progress["stage"], "merge")
+        self.assertEqual(merge_progress["status"], "complete")
+        self.assertNotIn("kind", merge_progress)
+        self.assertNotIn("elapsedSeconds", merge_progress)
 
     def test_processor_rejects_missing_input_deterministically(self) -> None:
         result = self._run_processor({"input": {"filePath": str(self.temp_dir / "missing.glb"), "nodeId": "rig-mesh"}, "params": {}})
