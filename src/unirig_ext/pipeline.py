@@ -1,12 +1,10 @@
 from __future__ import annotations
 
-import concurrent.futures
 import json
 import re
 import shutil
 import subprocess
 import sys
-import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -19,9 +17,8 @@ class PipelineError(UniRigError):
     pass
 
 
-ProgressFn = Callable[..., None]
-LogFn = Callable[..., None]
-CANONICAL_STAGE_NAMES = ("extract-prepare", "skeleton", "extract-skin", "skin", "merge")
+ProgressFn = Callable[[int, str], None]
+LogFn = Callable[[str], None]
 SKELETON_TASK = "configs/task/quick_inference_skeleton_articulationxl_ar_256.yaml"
 SKIN_TASK = "configs/task/quick_inference_unirig_skin.yaml"
 SKIN_DATA_NAME = "raw_data.npz"
@@ -33,10 +30,6 @@ WINDOWS_NATIVE_ACCESS_VIOLATION_CODES = {3221225477, -1073741819}
 RUNTIME_STAGE_TOKEN = "run-processor"
 WRAPPER_RUNTIME_BOUNDARY_OWNER = "wrapper-venv-python"
 BLENDER_SUBPROCESS_TIMEOUT_SECONDS = 1800
-HEARTBEAT_INTERVAL_SECONDS = 10
-HEARTBEAT_POLL_SECONDS = 1.0
-_MONOTONIC = time.monotonic
-_SLEEP = time.sleep
 
 
 @dataclass(frozen=True)
@@ -60,8 +53,8 @@ def run(
     log: LogFn | None = None,
     workspace_dir: Path | None = None,
 ) -> Path:
-    progress = progress or (lambda percent, label, **meta: None)
-    log = log or (lambda message, **meta: None)
+    progress = progress or (lambda percent, label: None)
+    log = log or (lambda message: None)
 
     mesh_path = io.validate_mesh_input(mesh_path)
     run_dir = io.create_run_dir(context)
@@ -101,7 +94,7 @@ def _run_real_pipeline(
 ) -> Path:
     seed = int(params.get("seed", 12345))
     prepared = io.prepare_input_mesh(staged_input, run_dir, context)
-    progress(20, "input prepared", stage="extract-prepare", status="complete")
+    progress(20, "input prepared")
 
     plan = build_execution_plan(
         mesh_path=mesh_path,
@@ -114,19 +107,22 @@ def _run_real_pipeline(
 
     try:
         shutil.copy2(prepared, _require_runtime_input_path(plan[0]))
-        _run_stage(plan[0], context=context, run_dir=run_dir, log=log)
-        progress(35, "prepare/extract complete", stage="extract-prepare", status="complete")
+        _run_stage(plan[0], context=context, run_dir=run_dir)
+        progress(35, "prepare/extract complete")
 
-        _run_stage(plan[1], context=context, run_dir=run_dir, log=log)
-        progress(55, "skeleton stage complete", stage="skeleton", status="complete")
+        log("running skeleton stage")
+        _run_stage(plan[1], context=context, run_dir=run_dir)
+        progress(55, "skeleton stage complete")
 
         shutil.copy2(plan[1].success_path, _require_runtime_input_path(plan[2]))
-        _run_stage(plan[2], context=context, run_dir=run_dir, log=log)
-        _run_stage(plan[3], context=context, run_dir=run_dir, log=log)
-        progress(78, "skin stage complete", stage="skin", status="complete")
+        _run_stage(plan[2], context=context, run_dir=run_dir)
+        log("running skin stage")
+        _run_stage(plan[3], context=context, run_dir=run_dir)
+        progress(78, "skin stage complete")
 
-        _run_stage(plan[4], context=context, run_dir=run_dir, log=log)
-        progress(92, "merge stage complete", stage="merge", status="complete")
+        log("running merge stage")
+        _run_stage(plan[4], context=context, run_dir=run_dir)
+        progress(92, "merge stage complete")
         return io.publish_output(plan[4].success_path, mesh_path, context=context, workspace_dir=workspace_dir)
     finally:
         _cleanup_staged_files(*staged_files)
@@ -396,66 +392,7 @@ def _require_runtime_input_path(stage: ExecutionStage) -> Path:
     return stage.runtime_input_path
 
 
-def _emit_stage_start(stage: str, log: LogFn) -> None:
-    log(f"running {stage} stage", stage=stage, kind="stage-start", status="running")
-
-
-def _emit_stage_heartbeat(stage: str, elapsed_seconds: int, log: LogFn) -> None:
-    log(
-        f"{stage} stage still running ({elapsed_seconds}s elapsed)",
-        stage=stage,
-        kind="heartbeat",
-        status="running",
-        elapsedSeconds=elapsed_seconds,
-    )
-
-
-def _heartbeat_elapsed_seconds(*, started_at: float, current_time: float) -> int:
-    elapsed = int(current_time - started_at)
-    if elapsed < 0:
-        return 0
-    return elapsed
-
-
-def _sleep_until_next_heartbeat_check(*, started_at: float, next_heartbeat_at: int) -> None:
-    now = _MONOTONIC()
-    elapsed = _heartbeat_elapsed_seconds(started_at=started_at, current_time=now)
-    remaining = next_heartbeat_at - elapsed
-    if remaining <= 0:
-        _SLEEP(0)
-        return
-    _SLEEP(min(HEARTBEAT_POLL_SECONDS, float(remaining)))
-
-
-def _run_stage(stage: ExecutionStage, *, context: RuntimeContext, run_dir: Path, log: LogFn | None = None) -> None:
-    log = log or (lambda message, **meta: None)
-    _emit_stage_start(stage.name, log)
-    _run_stage_with_heartbeat(stage=stage, context=context, run_dir=run_dir, log=log)
-
-
-def _run_stage_with_heartbeat(*, stage: ExecutionStage, context: RuntimeContext, run_dir: Path, log: LogFn) -> None:
-    started_at = _MONOTONIC()
-    next_heartbeat_at = HEARTBEAT_INTERVAL_SECONDS
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-        future = executor.submit(_run_stage_blocking, stage=stage, context=context, run_dir=run_dir)
-        while not future.done():
-            elapsed = _heartbeat_elapsed_seconds(started_at=started_at, current_time=_MONOTONIC())
-            while elapsed >= next_heartbeat_at:
-                _SLEEP(0)
-                if future.done():
-                    break
-                _emit_stage_heartbeat(stage.name, next_heartbeat_at, log)
-                next_heartbeat_at += HEARTBEAT_INTERVAL_SECONDS
-            if future.done():
-                break
-            if future.done():
-                break
-            _sleep_until_next_heartbeat_check(started_at=started_at, next_heartbeat_at=next_heartbeat_at)
-        future.result()
-
-
-def _run_stage_blocking(*, stage: ExecutionStage, context: RuntimeContext, run_dir: Path) -> None:
+def _run_stage(stage: ExecutionStage, *, context: RuntimeContext, run_dir: Path) -> None:
     if stage.runtime_boundary_owner == blender_bridge.BLENDER_SUBPROCESS_MODE:
         _run_blender_subprocess_stage(stage=stage, context=context, run_dir=run_dir)
         return

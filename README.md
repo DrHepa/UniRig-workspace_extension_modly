@@ -17,10 +17,7 @@ Everything else is **upstream-first**: the wrapper stages a pinned UniRig checko
 - node id: `rig-mesh`
 - stdin payload: `input.filePath`, `input.nodeId`, optional `params.seed`, plus top-level host workspace fields such as `workspaceDir` / `tempDir`
 - stdout event types: `progress`, `log`, `done`, `error`
-- `log` / `progress` may carry optional metadata (`stage`, `kind`, `status`, `elapsedSeconds`) for minimal liveness without changing event types
 - success result shape: `{"filePath": "..._unirig.glb"}`
-
-Minimal liveness stays backward-compatible: the wrapper reports stage starts and long-stage heartbeats through the existing `log` / `progress` events, and there is **no stdout/stderr streaming** on the public stream.
 
 ## Workspace publication contract
 

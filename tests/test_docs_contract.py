@@ -10,30 +10,6 @@ ARCHITECTURE = ROOT / "docs" / "architecture.md"
 
 
 class DocsContractTests(unittest.TestCase):
-    def test_docs_describe_stable_event_types_with_optional_liveness_metadata(self) -> None:
-        readme = README.read_text(encoding="utf-8").lower()
-        architecture = ARCHITECTURE.read_text(encoding="utf-8").lower()
-
-        for document in (readme, architecture):
-            self.assertIn("progress", document)
-            self.assertIn("log", document)
-            self.assertIn("done", document)
-            self.assertIn("error", document)
-            self.assertIn("optional metadata", document)
-            self.assertIn("stage", document)
-            self.assertIn("kind", document)
-            self.assertIn("status", document)
-            self.assertIn("elapsedseconds", document)
-            self.assertIn("no stdout/stderr streaming", document)
-
-    def test_architecture_doc_names_the_contract_tests_that_lock_liveness_behavior(self) -> None:
-        architecture = ARCHITECTURE.read_text(encoding="utf-8").lower()
-
-        self.assertIn("tests/test_processor_protocol.py", architecture)
-        self.assertIn("tests/test_docs_contract.py", architecture)
-        self.assertIn("public protocol", architecture)
-        self.assertIn("docs contract", architecture)
-
     def test_readme_documents_workspace_publication_contract(self) -> None:
         readme = README.read_text(encoding="utf-8").lower()
 

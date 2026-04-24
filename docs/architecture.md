@@ -9,12 +9,10 @@ This repository is a **thin wrapper** that preserves Modly's public process boun
 1. `manifest.json` and `processor.py` keep the public Modly contract stable.
 2. `setup.py` acts as the wrapper's **planner/executor** for deterministic upstream staging, host-aware install planning, venv creation, preflight reporting, and readiness persistence.
 3. `bootstrap.ensure_ready()` verifies the staged runtime and returns actionable failures.
-4. `pipeline.run()` adapts Modly inputs to one deterministic upstream execution path and emits minimal liveness through existing `log` / `progress` events.
+4. `pipeline.run()` adapts Modly inputs to one deterministic upstream execution path.
 5. `metadata.write_sidecar()` writes the stable `.rigmeta.json` handoff beside the published mesh.
 
 This is an **upstream-first** design: the wrapper does not own a second rigging policy engine.
-
-The public JSON-line contract stays limited to `progress`, `log`, `done`, and `error`. For backward-compatible liveness, `log` / `progress` may include optional metadata fields `stage`, `kind`, `status`, and `elapsedSeconds`; there is **no stdout/stderr streaming** on the public stream.
 
 At the process boundary, Modly may send top-level `workspaceDir` / `tempDir` fields to public `process` extensions. This wrapper currently uses `workspaceDir` as the canonical publication target when it is present, non-empty, and exists on disk; `tempDir` remains host/runtime context, not the published workflow destination.
 
@@ -96,7 +94,7 @@ Canonical publication rules:
 - `src/unirig_ext/pipeline.py` — deterministic upstream command adapter
 - `src/unirig_ext/io.py` — input validation, staging, and output publication
 - `src/unirig_ext/metadata.py` — sidecar writer with stable runtime facts only
-- `tests/` — public protocol checks in `tests/test_processor_protocol.py`, bootstrap/pipeline guardrails, and docs contract checks in `tests/test_docs_contract.py`
+- `tests/` — contract, bootstrap, pipeline, and docs posture checks
 
 ## Support posture
 
