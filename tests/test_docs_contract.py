@@ -37,6 +37,36 @@ class DocsContractTests(unittest.TestCase):
         self.assertIn("linux arm64", architecture)
         self.assertIn("secondary", architecture)
 
+    def test_docs_document_humanoid_contract_sidecar_and_deferred_glb_extras(self) -> None:
+        readme = README.read_text(encoding="utf-8").lower()
+        architecture = ARCHITECTURE.read_text(encoding="utf-8").lower()
+
+        for document in (readme, architecture):
+            self.assertIn("modly.humanoid.v1", document)
+            self.assertIn("humanoid_contract", document)
+            self.assertIn(".rigmeta.json", document)
+            self.assertIn("sidecar-first", document)
+            self.assertIn("done.result.filepath", document)
+            self.assertIn("glb extras", document)
+            self.assertIn("deferred", document)
+            self.assertIn("toes are optional", document)
+
+    def test_docs_document_metadata_mode_contract(self) -> None:
+        readme = README.read_text(encoding="utf-8").lower()
+        architecture = ARCHITECTURE.read_text(encoding="utf-8").lower()
+
+        for document in (readme, architecture):
+            self.assertIn("metadata_mode", document)
+            self.assertIn("auto", document)
+            self.assertIn("legacy", document)
+            self.assertIn("humanoid", document)
+            self.assertIn("companion", document)
+            self.assertIn("glb extras", document)
+            self.assertIn("topology profile", document)
+            self.assertIn("no glb mutation", document)
+            self.assertIn("fail closed", document)
+            self.assertIn("fallback warning", document)
+
     def test_docs_frame_linux_arm64_extract_merge_as_qualification_only(self) -> None:
         readme = README.read_text(encoding="utf-8")
         architecture = ARCHITECTURE.read_text(encoding="utf-8")

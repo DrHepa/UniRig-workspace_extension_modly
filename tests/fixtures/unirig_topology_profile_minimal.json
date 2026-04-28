@@ -1,0 +1,24 @@
+{
+  "asset": {"version": "2.0"},
+  "nodes": [
+    {"name": "hips", "children": [1, 11, 14]},
+    {"name": "spine", "children": [2]},
+    {"name": "chest", "children": [3, 5, 8]},
+    {"name": "neck", "children": [4]},
+    {"name": "head"},
+    {"name": "left_upper_arm", "children": [6]},
+    {"name": "left_lower_arm", "children": [7]},
+    {"name": "left_hand"},
+    {"name": "right_upper_arm", "children": [9]},
+    {"name": "right_lower_arm", "children": [10]},
+    {"name": "right_hand"},
+    {"name": "left_upper_leg", "children": [12]},
+    {"name": "left_lower_leg", "children": [13]},
+    {"name": "left_foot"},
+    {"name": "right_upper_leg", "children": [15]},
+    {"name": "right_lower_leg", "children": [16]},
+    {"name": "right_foot"}
+  ],
+  "skins": [{"joints": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16], "inverseBindMatrices": 0}],
+  "accessors": [{"count": 17}]
+}

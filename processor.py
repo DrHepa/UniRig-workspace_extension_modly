@@ -12,6 +12,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from unirig_ext import bootstrap, io, metadata, pipeline  # noqa: E402
+from unirig_ext.metadata_mode import normalize_metadata_mode  # noqa: E402
 
 
 def _send(message: dict) -> None:
@@ -81,6 +82,7 @@ def main() -> int:
         payload = _read_payload()
         input_payload = _require_object(payload, "input")
         params = _require_object(payload, "params")
+        metadata_mode = normalize_metadata_mode(params)
         workspace_dir = _resolve_workspace_dir(payload)
         node_id = input_payload.get("nodeId") or payload.get("nodeId") or ""
 
@@ -114,6 +116,7 @@ def main() -> int:
             input_path=mesh_path,
             seed=int(params.get("seed", 12345)),
             context=context,
+            metadata_mode=metadata_mode,
         )
         _send({"type": "done", "result": {"filePath": str(output_path)}})
         return 0

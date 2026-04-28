@@ -29,6 +29,22 @@ For Modly `process` extensions, the host may provide top-level `workspaceDir` / 
 - If `workspaceDir` is missing, empty, or does not exist, the wrapper keeps the compatible fallback and derives the output path from `input.filePath`.
 - On Linux ARM64, any compatibility mirror back onto the original input path is secondary only; it is NOT the canonical output and does not replace the workspace `done.result.filePath`.
 
+## Humanoid metadata contract
+
+UniRig writes retargeting metadata sidecar-first under the adjacent `.rigmeta.json` file. When declared humanoid source metadata is available, the sidecar includes `humanoid_contract.schema = "modly.humanoid.v1"` with required core full-body roles, ordered parent-to-child chains, rest transforms, basis hints, confidence, provenance, warnings, and mesh hashes. Toes are optional: when declared, toe nodes extend the leg chains; when absent, the core leg chains remain valid through the foot nodes. Optional fingers may be absent or partial, but incomplete finger chains must produce deterministic warnings instead of pretending the hand mapping is complete.
+
+The public Modly process result is unchanged: `done.result.filePath` still contains only the canonical GLB path. Consumers that do not understand `humanoid_contract` can keep reading the legacy sidecar fields. GLB extras mirroring is deferred; the `.rigmeta.json` sidecar remains the authoritative contract so output byte and hash semantics stay explicit.
+
+### `metadata_mode`
+
+The public node parameter `metadata_mode` controls humanoid sidecar emission without changing `done.result.filePath` and with **no GLB mutation**:
+
+- `auto` is the default. UniRig tries deterministic humanoid resolution and, if no valid source exists, still writes the legacy-compatible sidecar with a deterministic fallback warning and provenance.
+- `legacy` suppresses humanoid output completely. Even if a companion file or GLB extras exist, the `.rigmeta.json` sidecar omits `humanoid_contract`, humanoid provenance, and humanoid warnings.
+- `humanoid` is fail closed. A valid humanoid source is required; if resolution or validation fails, processing emits `error` before `done` and explains how to provide metadata.
+
+Resolution priority is bounded and deterministic: adjacent companion `<output-stem>.humanoid.json` first, read-only GLB extras (`extras.unirig_humanoid`) second, and an exact known UniRig topology profile third. The topology profile path is intentionally narrow; unknown or ambiguous topology is rejected instead of guessed.
+
 ## Install and repair
 
 Modly may run:

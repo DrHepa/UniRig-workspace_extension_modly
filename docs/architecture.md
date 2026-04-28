@@ -10,7 +10,7 @@ This repository is a **thin wrapper** that preserves Modly's public process boun
 2. `setup.py` acts as the wrapper's **planner/executor** for deterministic upstream staging, host-aware install planning, venv creation, preflight reporting, and readiness persistence.
 3. `bootstrap.ensure_ready()` verifies the staged runtime and returns actionable failures.
 4. `pipeline.run()` adapts Modly inputs to one deterministic upstream execution path.
-5. `metadata.write_sidecar()` writes the stable `.rigmeta.json` handoff beside the published mesh.
+5. `metadata.write_sidecar()` writes the stable `.rigmeta.json` handoff beside the published mesh and appends the sidecar-first `humanoid_contract` when declared humanoid metadata is available.
 
 This is an **upstream-first** design: the wrapper does not own a second rigging policy engine.
 
@@ -85,6 +85,16 @@ Canonical publication rules:
 - `done.result.filePath` must report the canonical published artifact, not an implementation-internal temp path.
 - On Linux ARM64, any mirror back onto the original input path is secondary compatibility behavior only; it does not change the canonical workspace artifact or the reported `done.result.filePath`.
 
+Humanoid contract rules:
+
+- `humanoid_contract.schema` is `modly.humanoid.v1` and lives under the adjacent `.rigmeta.json` sidecar.
+- The contract is sidecar-first and authoritative; `done.result.filePath` remains the unchanged public process result shape.
+- Required core full-body roles and chains must be explicit and validated before claiming humanoid metadata. Toes are optional: declared toe nodes extend the corresponding leg chains, while missing toes keep leg chains valid through the foot nodes. Optional fingers degrade through deterministic warnings when they are absent or partially declared.
+- GLB extras mirroring is deferred so published GLB bytes and hashes remain explicit and the sidecar stays the source of truth.
+- `metadata_mode` is the public output contract switch. `auto` attempts bounded resolution and writes a legacy-compatible fallback warning when no valid source exists; `legacy` omits all humanoid fields; `humanoid` must fail closed before `done` unless a valid contract can be built.
+- Humanoid resolution priority is deterministic: companion `<output-stem>.humanoid.json`, then read-only GLB extras (`extras.unirig_humanoid`), then an exact known UniRig topology profile. The topology profile path is deliberately bounded; unknown or ambiguous output topology is rejected instead of inferred.
+- The mode switch never mutates GLB bytes: no GLB mutation is part of the contract, and the adjacent sidecar remains authoritative.
+
 ## Repository layout
 
 - `manifest.json` — public Modly process manifest
@@ -93,7 +103,8 @@ Canonical publication rules:
 - `src/unirig_ext/bootstrap.py` — minimal runtime-state normalization and readiness verification
 - `src/unirig_ext/pipeline.py` — deterministic upstream command adapter
 - `src/unirig_ext/io.py` — input validation, staging, and output publication
-- `src/unirig_ext/metadata.py` — sidecar writer with stable runtime facts only
+- `src/unirig_ext/metadata.py` — sidecar writer with stable runtime facts and optional humanoid contract enrichment
+- `src/unirig_ext/humanoid_contract.py` — deterministic `modly.humanoid.v1` payload builder and validator
 - `tests/` — contract, bootstrap, pipeline, and docs posture checks
 
 ## Support posture

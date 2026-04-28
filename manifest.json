@@ -21,6 +21,27 @@
           "min": 0,
           "max": 2147483647,
           "tooltip": "Deterministic seed forwarded to the runtime pipeline."
+        },
+        {
+          "id": "metadata_mode",
+          "label": "Metadata Mode",
+          "type": "select",
+          "default": "auto",
+          "options": [
+            {
+              "value": "auto",
+              "label": "Auto"
+            },
+            {
+              "value": "legacy",
+              "label": "Legacy Bones"
+            },
+            {
+              "value": "humanoid",
+              "label": "Humanoid Contract"
+            }
+          ],
+          "tooltip": "Controls .rigmeta.json humanoid contract emission: auto falls back safely, legacy suppresses humanoid data, humanoid fails closed."
         }
       ]
     }

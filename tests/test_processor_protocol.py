@@ -26,6 +26,7 @@ if str(SRC) not in sys.path:
 
 from unirig_ext import blender_bridge, bootstrap, pipeline
 from unirig_ext.bootstrap import RuntimeContext
+from unirig_ext.humanoid_contract import HumanoidContractError
 
 
 def write_minimal_valid_glb(target: Path) -> Path:
@@ -423,6 +424,7 @@ class ProcessorProtocolTests(unittest.TestCase):
         payload: dict,
         *,
         configure_pipeline: Callable[[object, ExitStack], None],
+        configure_metadata: Callable[[object, ExitStack], None] | None = None,
         timeout_seconds: float | None = None,
         **env_overrides: str,
     ) -> dict:
@@ -463,6 +465,8 @@ class ProcessorProtocolTests(unittest.TestCase):
                 stack.enter_context(mock.patch("sys.stderr", stderr_stream))
                 stack.enter_context(ready_context_patch)
                 configure_pipeline(processor_module.pipeline, stack)
+                if configure_metadata is not None:
+                    configure_metadata(processor_module.metadata, stack)
                 if timeout_seconds is None:
                     exit_code = processor_module.main()
                 else:
@@ -645,6 +649,36 @@ class ProcessorProtocolTests(unittest.TestCase):
         self.assertEqual(result["messages"][-1]["type"], "error")
         self.assertIn("Failed to publish UniRig output into the workspace Workflows directory", result["messages"][-1]["message"])
 
+    def test_processor_emits_error_without_done_when_humanoid_contract_validation_fails(self) -> None:
+        def configure_pipeline(pipeline_module: object, stack: ExitStack) -> None:
+            def fake_run(*, mesh_path: Path, params: dict, context: RuntimeContext, progress: Callable, log: Callable, workspace_dir: Path | None = None) -> Path:
+                del params, context, progress, log, workspace_dir
+                output_path = mesh_path.with_name(f"{mesh_path.stem}_unirig.glb")
+                output_path.write_bytes(b"published")
+                return output_path
+
+            stack.enter_context(mock.patch.object(pipeline_module, "run", side_effect=fake_run))
+
+        def configure_metadata(metadata_module: object, stack: ExitStack) -> None:
+            stack.enter_context(
+                mock.patch.object(
+                    metadata_module,
+                    "write_sidecar",
+                    side_effect=HumanoidContractError("Missing required humanoid role 'hips' from declared metadata."),
+                )
+            )
+
+        result = self._run_processor_inprocess_with_pipeline_patches(
+            {"input": {"filePath": str(self.input_mesh), "nodeId": "rig-mesh"}, "params": {"seed": 29}},
+            configure_pipeline=configure_pipeline,
+            configure_metadata=configure_metadata,
+        )
+
+        self.assertNotEqual(result["exit_code"], 0)
+        self.assertFalse(any(message["type"] == "done" for message in result["messages"]))
+        self.assertEqual(result["messages"][-1]["type"], "error")
+        self.assertIn("Missing required humanoid role 'hips'", result["messages"][-1]["message"])
+
     def test_processor_keeps_workspace_result_canonical_for_linux_arm64_hosts(self) -> None:
         trace_path = self.temp_dir / "fake-blender-arm64-workspace.jsonl"
         blender_path = self._make_fake_blender_executable(trace_path=trace_path, scenario="success")
@@ -700,6 +734,42 @@ class ProcessorProtocolTests(unittest.TestCase):
         messages = [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
         self.assertEqual(messages[-1]["type"], "error")
         self.assertIn("'params' must be a JSON object.", messages[-1]["message"])
+
+    def test_processor_rejects_invalid_metadata_mode_before_runtime_publication(self) -> None:
+        def configure_pipeline(pipeline_module: object, stack: ExitStack) -> None:
+            stack.enter_context(mock.patch.object(pipeline_module, "run", side_effect=AssertionError("pipeline must not run")))
+
+        result = self._run_processor_inprocess_with_pipeline_patches(
+            {"input": {"filePath": str(self.input_mesh), "nodeId": "rig-mesh"}, "params": {"metadata_mode": "bones"}},
+            configure_pipeline=configure_pipeline,
+        )
+
+        self.assertNotEqual(result["exit_code"], 0)
+        self.assertFalse(any(message["type"] == "done" for message in result["messages"]))
+        self.assertEqual(result["messages"][-1]["type"], "error")
+        self.assertIn("metadata_mode", result["messages"][-1]["message"])
+        self.assertIn("auto, legacy, humanoid", result["messages"][-1]["message"])
+
+    def test_processor_humanoid_mode_failure_emits_error_without_done(self) -> None:
+        def configure_pipeline(pipeline_module: object, stack: ExitStack) -> None:
+            def fake_run(*, mesh_path: Path, params: dict, context: RuntimeContext, progress: Callable, log: Callable, workspace_dir: Path | None = None) -> Path:
+                del params, context, progress, log, workspace_dir
+                output_path = mesh_path.with_name(f"{mesh_path.stem}_unirig.glb")
+                output_path.write_bytes(b"published")
+                return output_path
+
+            stack.enter_context(mock.patch.object(pipeline_module, "run", side_effect=fake_run))
+
+        result = self._run_processor_inprocess_with_pipeline_patches(
+            {"input": {"filePath": str(self.input_mesh), "nodeId": "rig-mesh"}, "params": {"seed": 31, "metadata_mode": "humanoid"}},
+            configure_pipeline=configure_pipeline,
+        )
+
+        self.assertNotEqual(result["exit_code"], 0)
+        self.assertFalse(any(message["type"] == "done" for message in result["messages"]))
+        self.assertEqual(result["messages"][-1]["type"], "error")
+        self.assertIn("metadata_mode=humanoid", result["messages"][-1]["message"])
+        self.assertIn("valid humanoid", result["messages"][-1]["message"])
 
     def test_processor_ignores_stage_override_environment_and_runs_upstream_path(self) -> None:
         trace_path = self.temp_dir / "hook-trace.jsonl"
