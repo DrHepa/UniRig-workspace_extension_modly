@@ -293,11 +293,22 @@ def _build_provenance(raw_provenance: Any) -> dict:
 
 
 def _validate_chain_order(chain_name: str, chain: list[str], nodes: dict[str, dict]) -> None:
-    for parent_id, child_id in zip(chain, chain[1:]):
-        if nodes.get(child_id, {}).get("parent") != parent_id:
+    for ancestor_id, descendant_id in zip(chain, chain[1:]):
+        if not _is_descendant(descendant_id, ancestor_id, nodes):
             raise HumanoidContractError(
-                f"Chain '{chain_name}' is not ordered parent-to-child: expected parent '{parent_id}' for node '{child_id}'."
+                f"Chain '{chain_name}' is not ordered ancestor-to-descendant: expected '{ancestor_id}' to contain node '{descendant_id}'."
             )
+
+
+def _is_descendant(descendant_id: str, ancestor_id: str, nodes: dict[str, dict]) -> bool:
+    current = nodes.get(descendant_id, {}).get("parent")
+    seen: set[str] = set()
+    while isinstance(current, str) and current not in seen:
+        if current == ancestor_id:
+            return True
+        seen.add(current)
+        current = nodes.get(current, {}).get("parent")
+    return False
 
 
 def _validate_matrix(matrix: Any, label: str) -> None:

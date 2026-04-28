@@ -17,6 +17,7 @@ if str(TESTS) not in sys.path:
     sys.path.insert(0, str(TESTS))
 
 from test_metadata import complete_humanoid_source
+from fixtures.unirig_real_topology import real_unirig_52_payload
 from unirig_ext.humanoid_source import HumanoidResolutionFailure, resolve_humanoid_source
 
 
@@ -68,6 +69,19 @@ class HumanoidSourceTests(unittest.TestCase):
 
             with self.assertRaisesRegex(HumanoidResolutionFailure, "companion.*JSON object"):
                 resolve_humanoid_source(output_path)
+
+    def test_real_unirig_52_bone_profile_resolves_as_topology_source(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="unirig-source-") as temp_dir:
+            output_path = Path(temp_dir) / "avatar_unirig.glb"
+            write_glb_json(output_path, real_unirig_52_payload())
+
+            resolved = resolve_humanoid_source(output_path)
+
+            self.assertEqual(resolved.kind, "topology_profile")
+            self.assertEqual(resolved.provenance["profile_id"], "unirig-anonymous-bone-52")
+            self.assertEqual(resolved.payload["roles"]["hips"], "bone_0")
+            self.assertEqual(resolved.payload["roles"]["right_foot"], "bone_51")
+            self.assertEqual(resolved.warnings[0]["code"], "humanoid_source_from_bounded_topology_profile")
 
 
 if __name__ == "__main__":
