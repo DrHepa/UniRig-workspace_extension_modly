@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import hashlib
 import shutil
+import struct
 import sys
 import tempfile
 import unittest
@@ -13,8 +14,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
+TESTS = ROOT / "tests"
 if str(SRC) not in __import__("sys").path:
     __import__("sys").path.insert(0, str(SRC))
+if str(TESTS) not in __import__("sys").path:
+    __import__("sys").path.insert(0, str(TESTS))
 
 from unirig_ext import bootstrap
 from unirig_ext.bootstrap import RuntimeContext
@@ -27,12 +31,31 @@ from unirig_ext.humanoid_contract import (
     validate_humanoid_contract,
 )
 from unirig_ext.metadata import build_sidecar, sidecar_path_for, write_sidecar
+from unirig_ext.humanoid_source import HumanoidResolutionFailure
+from fixtures.unirig_real_topology import real_unirig_40_payload
+
+
+def write_glb_json(target: Path, payload: dict) -> Path:
+    json_chunk = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    while len(json_chunk) % 4:
+        json_chunk += b" "
+    blob = bytearray(b"glTF")
+    blob += struct.pack("<I", 2)
+    blob += struct.pack("<I", 12 + 8 + len(json_chunk))
+    blob += struct.pack("<I", len(json_chunk))
+    blob += b"JSON"
+    blob += json_chunk
+    target.write_bytes(blob)
+    return target
 
 
 def complete_humanoid_source(
     *,
     include_fingers: bool = True,
     include_toes: bool = True,
+    include_shoulders: bool = False,
+    shoulder_aliases: bool = False,
+    malformed_shoulder: bool = False,
     partial_finger_chain: bool = False,
     basis_status: str = "asserted",
 ) -> dict:
@@ -80,6 +103,15 @@ def complete_humanoid_source(
         "right_lower_leg": "right_upper_leg",
         "right_foot": "right_lower_leg",
     }
+    if include_shoulders:
+        left_role = "left_clavicle" if shoulder_aliases else "left_shoulder"
+        right_role = "right_clavicle" if shoulder_aliases else "right_shoulder"
+        roles[left_role] = "missing_left_shoulder" if malformed_shoulder else "left_shoulder"
+        roles[right_role] = "right_shoulder"
+        parents["left_shoulder"] = "chest"
+        parents["left_upper_arm"] = "left_shoulder"
+        parents["right_shoulder"] = "chest"
+        parents["right_upper_arm"] = "right_shoulder"
     if include_toes:
         roles["left_toe"] = "left_toe"
         roles["right_toe"] = "right_toe"
@@ -204,6 +236,39 @@ class MetadataTests(unittest.TestCase):
             ],
         )
 
+    def test_contract_emits_optional_shoulder_roles_and_proximal_arm_chains(self) -> None:
+        contract = build_contract_from_declared_data(
+            complete_humanoid_source(include_shoulders=True, include_fingers=False),
+            source_hash="5" * 64,
+            output_hash="6" * 64,
+        )
+
+        self.assertEqual(contract["required_roles"]["left_upper_arm"], "left_upper_arm")
+        self.assertEqual(contract["optional_roles"]["left_shoulder"], "left_shoulder")
+        self.assertEqual(contract["optional_roles"]["right_shoulder"], "right_shoulder")
+        self.assertEqual(contract["chains"]["left_arm"], ["left_upper_arm", "left_lower_arm", "left_hand"])
+        self.assertEqual(contract["chains"]["left_arm_proximal"], ["left_shoulder", "left_upper_arm", "left_lower_arm", "left_hand"])
+        self.assertEqual(contract["chains"]["right_arm_proximal"], ["right_shoulder", "right_upper_arm", "right_lower_arm", "right_hand"])
+
+    def test_contract_canonicalizes_clavicle_aliases_to_optional_shoulder_roles(self) -> None:
+        contract = build_contract_from_declared_data(
+            complete_humanoid_source(include_shoulders=True, shoulder_aliases=True, include_fingers=False),
+            source_hash="5" * 64,
+            output_hash="6" * 64,
+        )
+
+        self.assertEqual(contract["optional_roles"], {"left_shoulder": "left_shoulder", "right_shoulder": "right_shoulder"})
+        self.assertNotIn("left_clavicle", contract["optional_roles"])
+        self.assertNotIn("right_clavicle", contract["optional_roles"])
+
+    def test_malformed_optional_shoulder_role_fails_closed(self) -> None:
+        with self.assertRaisesRegex(HumanoidContractError, "Optional humanoid role 'left_shoulder' references unknown node 'missing_left_shoulder'"):
+            build_contract_from_declared_data(
+                complete_humanoid_source(include_shoulders=True, malformed_shoulder=True),
+                source_hash="5" * 64,
+                output_hash="6" * 64,
+            )
+
     def test_partial_optional_finger_chain_succeeds_with_deterministic_warning(self) -> None:
         contract = build_contract_from_declared_data(
             complete_humanoid_source(include_fingers=True, partial_finger_chain=True),
@@ -281,6 +346,32 @@ class MetadataTests(unittest.TestCase):
         self.assertEqual(first["metadata_version"], 1)
         self.assertEqual(first["humanoid_contract"]["schema"], HUMANOID_SCHEMA)
         self.assertEqual(first["humanoid_contract"]["hashes"]["source_sha256"], first["source_sha256"])
+
+    def test_legacy_mode_skips_semantic_resolver_and_emits_no_humanoid_metadata(self) -> None:
+        payload = build_sidecar(self.output_mesh, self.input_mesh, 12345, self.context, metadata_mode="legacy")
+
+        self.assertNotIn("metadata_mode", payload)
+        self.assertNotIn("humanoid_source_kind", payload)
+        self.assertNotIn("humanoid_contract", payload)
+
+    def test_auto_mode_semantic_failure_writes_legacy_warning(self) -> None:
+        payload = build_sidecar(self.output_mesh, self.input_mesh, 12345, self.context, metadata_mode="auto")
+
+        self.assertEqual(payload["humanoid_source_kind"], "fallback")
+        self.assertEqual(payload["humanoid_warnings"][0]["code"], "humanoid_metadata_unavailable")
+        self.assertIn("metadata_mode=auto", payload["humanoid_warnings"][0]["message"])
+
+    def test_humanoid_mode_semantic_failure_is_actionable_before_done(self) -> None:
+        with self.assertRaisesRegex(HumanoidResolutionFailure, "semantic resolver"):
+            build_sidecar(self.output_mesh, self.input_mesh, 12345, self.context, metadata_mode="humanoid")
+
+    def test_auto_mode_success_records_semantic_resolver_source_kind(self) -> None:
+        write_glb_json(self.output_mesh, real_unirig_40_payload())
+
+        payload = build_sidecar(self.output_mesh, self.input_mesh, 12345, self.context, metadata_mode="auto")
+
+        self.assertEqual(payload["humanoid_source_kind"], "semantic_resolver")
+        self.assertEqual(payload["humanoid_contract"]["required_roles"]["right_foot"], "bone_39")
 
     def test_write_sidecar_records_deterministic_payload_hash_semantics(self) -> None:
         destination = write_sidecar(

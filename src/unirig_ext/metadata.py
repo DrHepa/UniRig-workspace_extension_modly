@@ -115,7 +115,8 @@ def _apply_humanoid_metadata(
             raise HumanoidResolutionFailure(
                 "metadata_mode=humanoid requires a valid humanoid contract source before publishing done. "
                 f"Resolution/validation failed: {exc}. Remediation: provide a valid adjacent "
-                "<output_stem>.humanoid.json, retained GLB extras.unirig_humanoid, or a bounded known UniRig topology profile."
+                "<output_stem>.humanoid.json, retained GLB extras.unirig_humanoid, or GLB skin joints/rest transforms "
+                "that the semantic resolver can classify with sufficient confidence."
             ) from exc
         payload["humanoid_source_kind"] = "fallback"
         payload["humanoid_provenance"] = {

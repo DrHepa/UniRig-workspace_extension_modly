@@ -55,6 +55,48 @@ REAL_UNIRIG_52_EDGES = (
     ("bone_50", "bone_51"),
 )
 
+REAL_UNIRIG_40_EDGES = (
+    ("bone_0", "bone_1"),
+    ("bone_1", "bone_2"),
+    ("bone_2", "bone_3"),
+    ("bone_3", "bone_4"),
+    ("bone_4", "bone_5"),
+    ("bone_3", "bone_6"),
+    ("bone_6", "bone_7"),
+    ("bone_7", "bone_8"),
+    ("bone_8", "bone_9"),
+    ("bone_9", "bone_10"),
+    ("bone_10", "bone_11"),
+    ("bone_11", "bone_12"),
+    ("bone_9", "bone_13"),
+    ("bone_13", "bone_14"),
+    ("bone_14", "bone_15"),
+    ("bone_9", "bone_16"),
+    ("bone_16", "bone_17"),
+    ("bone_17", "bone_18"),
+    ("bone_3", "bone_19"),
+    ("bone_19", "bone_20"),
+    ("bone_20", "bone_21"),
+    ("bone_21", "bone_22"),
+    ("bone_22", "bone_23"),
+    ("bone_23", "bone_24"),
+    ("bone_24", "bone_25"),
+    ("bone_22", "bone_26"),
+    ("bone_26", "bone_27"),
+    ("bone_27", "bone_28"),
+    ("bone_22", "bone_29"),
+    ("bone_29", "bone_30"),
+    ("bone_30", "bone_31"),
+    ("bone_0", "bone_32"),
+    ("bone_32", "bone_33"),
+    ("bone_33", "bone_34"),
+    ("bone_34", "bone_35"),
+    ("bone_0", "bone_36"),
+    ("bone_36", "bone_37"),
+    ("bone_37", "bone_38"),
+    ("bone_38", "bone_39"),
+)
+
 
 def real_unirig_52_payload() -> dict:
     """Return a compact glTF JSON fixture for the real anonymous 52-bone UniRig profile."""
@@ -71,10 +113,27 @@ def real_unirig_52_payload() -> dict:
         parent_node.setdefault("children", []).append(index_by_name[child])
 
     nodes[index_by_name["bone_0"]]["translation"] = [0.0, 1.0, 0.0]
-    nodes[index_by_name["bone_1"]]["translation"] = [0.0, 2.0, 0.0]
-    nodes[index_by_name["bone_3"]]["translation"] = [0.0, 3.0, 0.0]
-    nodes[index_by_name["bone_6"]]["translation"] = [-1.0, 0.0, 0.0]
-    nodes[index_by_name["bone_25"]]["translation"] = [1.0, 0.0, 0.0]
+    nodes[index_by_name["bone_1"]]["translation"] = [0.0, 0.7, 0.0]
+    nodes[index_by_name["bone_2"]]["translation"] = [0.0, 0.5, 0.0]
+    nodes[index_by_name["bone_3"]]["translation"] = [0.0, 0.5, 0.0]
+    nodes[index_by_name["bone_4"]]["translation"] = [0.0, 0.4, 0.0]
+    nodes[index_by_name["bone_5"]]["translation"] = [0.0, 0.35, 0.0]
+    nodes[index_by_name["bone_6"]]["translation"] = [-0.25, 0.05, 0.0]
+    nodes[index_by_name["bone_7"]]["translation"] = [-0.45, -0.05, 0.0]
+    nodes[index_by_name["bone_8"]]["translation"] = [-0.45, -0.05, 0.0]
+    nodes[index_by_name["bone_9"]]["translation"] = [-0.25, -0.05, 0.0]
+    nodes[index_by_name["bone_25"]]["translation"] = [0.25, 0.05, 0.0]
+    nodes[index_by_name["bone_26"]]["translation"] = [0.45, -0.05, 0.0]
+    nodes[index_by_name["bone_27"]]["translation"] = [0.45, -0.05, 0.0]
+    nodes[index_by_name["bone_28"]]["translation"] = [0.25, -0.05, 0.0]
+    nodes[index_by_name["bone_44"]]["translation"] = [-0.18, -0.8, 0.0]
+    nodes[index_by_name["bone_45"]]["translation"] = [0.0, -0.8, 0.0]
+    nodes[index_by_name["bone_46"]]["translation"] = [0.0, -0.25, 0.0]
+    nodes[index_by_name["bone_47"]]["translation"] = [0.0, -0.05, 0.35]
+    nodes[index_by_name["bone_48"]]["translation"] = [0.18, -0.8, 0.0]
+    nodes[index_by_name["bone_49"]]["translation"] = [0.0, -0.8, 0.0]
+    nodes[index_by_name["bone_50"]]["translation"] = [0.0, -0.25, 0.0]
+    nodes[index_by_name["bone_51"]]["translation"] = [0.0, -0.05, 0.35]
 
     joints = [index_by_name[f"bone_{number}"] for number in range(52)]
     return {
@@ -82,4 +141,50 @@ def real_unirig_52_payload() -> dict:
         "nodes": nodes,
         "skins": [{"joints": joints, "inverseBindMatrices": 0}],
         "accessors": [{"count": 52}],
+    }
+
+
+def real_unirig_40_payload() -> dict:
+    """Return a compact glTF JSON fixture for the real anonymous 40-bone UniRig profile."""
+    nodes = [
+        {"name": "scene_root", "children": [2]},
+        {"name": "mesh"},
+    ]
+    nodes.extend({"name": f"bone_{number}"} for number in range(40))
+    nodes.append({"name": "camera_helper"})
+
+    index_by_name = {node["name"]: index for index, node in enumerate(nodes)}
+    for parent, child in REAL_UNIRIG_40_EDGES:
+        parent_node = nodes[index_by_name[parent]]
+        parent_node.setdefault("children", []).append(index_by_name[child])
+
+    nodes[index_by_name["bone_0"]]["translation"] = [0.0, 1.0, 0.0]
+    nodes[index_by_name["bone_1"]]["translation"] = [0.0, 0.7, 0.0]
+    nodes[index_by_name["bone_2"]]["translation"] = [0.0, 0.5, 0.0]
+    nodes[index_by_name["bone_3"]]["translation"] = [0.0, 0.5, 0.0]
+    nodes[index_by_name["bone_4"]]["translation"] = [0.0, 0.4, 0.0]
+    nodes[index_by_name["bone_5"]]["translation"] = [0.0, 0.35, 0.0]
+    nodes[index_by_name["bone_6"]]["translation"] = [-0.25, 0.05, 0.0]
+    nodes[index_by_name["bone_7"]]["translation"] = [-0.45, -0.05, 0.0]
+    nodes[index_by_name["bone_8"]]["translation"] = [-0.45, -0.05, 0.0]
+    nodes[index_by_name["bone_9"]]["translation"] = [-0.25, -0.05, 0.0]
+    nodes[index_by_name["bone_19"]]["translation"] = [0.25, 0.05, 0.0]
+    nodes[index_by_name["bone_20"]]["translation"] = [0.45, -0.05, 0.0]
+    nodes[index_by_name["bone_21"]]["translation"] = [0.45, -0.05, 0.0]
+    nodes[index_by_name["bone_22"]]["translation"] = [0.25, -0.05, 0.0]
+    nodes[index_by_name["bone_32"]]["translation"] = [-0.18, -0.8, 0.0]
+    nodes[index_by_name["bone_33"]]["translation"] = [0.0, -0.8, 0.0]
+    nodes[index_by_name["bone_34"]]["translation"] = [0.0, -0.25, 0.0]
+    nodes[index_by_name["bone_35"]]["translation"] = [0.0, -0.05, 0.35]
+    nodes[index_by_name["bone_36"]]["translation"] = [0.18, -0.8, 0.0]
+    nodes[index_by_name["bone_37"]]["translation"] = [0.0, -0.8, 0.0]
+    nodes[index_by_name["bone_38"]]["translation"] = [0.0, -0.25, 0.0]
+    nodes[index_by_name["bone_39"]]["translation"] = [0.0, -0.05, 0.35]
+
+    joints = [index_by_name[f"bone_{number}"] for number in range(40)]
+    return {
+        "asset": {"version": "2.0"},
+        "nodes": nodes,
+        "skins": [{"joints": joints, "inverseBindMatrices": 0}],
+        "accessors": [{"count": 40}],
     }

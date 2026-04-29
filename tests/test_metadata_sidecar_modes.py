@@ -70,15 +70,15 @@ class MetadataSidecarModeTests(unittest.TestCase):
         with self.assertRaisesRegex(Exception, "metadata_mode=humanoid.*valid humanoid"):
             build_sidecar(self.output_mesh, self.input_mesh, 12345, self.context, metadata_mode="humanoid")
 
-    def test_humanoid_mode_emits_sidecar_from_real_unirig_52_bone_profile(self) -> None:
+    def test_humanoid_mode_emits_sidecar_from_real_unirig_52_bone_semantic_resolver(self) -> None:
         write_glb_json(self.output_mesh, real_unirig_52_payload())
 
         payload = build_sidecar(self.output_mesh, self.input_mesh, 12345, self.context, metadata_mode="humanoid")
 
         self.assertEqual(payload["metadata_mode"], "humanoid")
-        self.assertEqual(payload["humanoid_source_kind"], "topology_profile")
+        self.assertEqual(payload["humanoid_source_kind"], "semantic_resolver")
         self.assertEqual(payload["humanoid_contract"]["required_roles"]["hips"], "bone_0")
-        self.assertEqual(payload["humanoid_contract"]["nodes"]["bone_1"]["transforms"]["rest_world"][1][3], 3.0)
+        self.assertEqual(payload["humanoid_contract"]["nodes"]["bone_1"]["transforms"]["rest_world"][1][3], 1.7)
 
 
 if __name__ == "__main__":

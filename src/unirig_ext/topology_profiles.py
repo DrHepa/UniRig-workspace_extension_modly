@@ -1,5 +1,13 @@
 from __future__ import annotations
 
+"""Exact UniRig topology fixtures/oracles.
+
+Runtime humanoid source resolution no longer dispatches through this module by
+joint count or anonymous ``bone_N`` names. Keep these profiles as regression
+oracles for known historical UniRig variants while product behavior flows
+through ``semantic_humanoid_resolver``.
+"""
+
 import hashlib
 import json
 import math
@@ -39,11 +47,13 @@ REAL_UNIRIG_52_ROLE_MAP = {
     "chest": "bone_3",
     "neck": "bone_4",
     "head": "bone_5",
-    "left_upper_arm": "bone_6",
-    "left_lower_arm": "bone_7",
+    "left_shoulder": "bone_6",
+    "left_upper_arm": "bone_7",
+    "left_lower_arm": "bone_8",
     "left_hand": "bone_9",
-    "right_upper_arm": "bone_25",
-    "right_lower_arm": "bone_26",
+    "right_shoulder": "bone_25",
+    "right_upper_arm": "bone_26",
+    "right_lower_arm": "bone_27",
     "right_hand": "bone_28",
     "left_upper_leg": "bone_44",
     "left_lower_leg": "bone_45",
@@ -51,6 +61,28 @@ REAL_UNIRIG_52_ROLE_MAP = {
     "right_upper_leg": "bone_48",
     "right_lower_leg": "bone_49",
     "right_foot": "bone_51",
+}
+
+REAL_UNIRIG_40_ROLE_MAP = {
+    "hips": "bone_0",
+    "spine": "bone_1",
+    "chest": "bone_3",
+    "neck": "bone_4",
+    "head": "bone_5",
+    "left_shoulder": "bone_6",
+    "left_upper_arm": "bone_7",
+    "left_lower_arm": "bone_8",
+    "left_hand": "bone_9",
+    "right_shoulder": "bone_19",
+    "right_upper_arm": "bone_20",
+    "right_lower_arm": "bone_21",
+    "right_hand": "bone_22",
+    "left_upper_leg": "bone_32",
+    "left_lower_leg": "bone_33",
+    "left_foot": "bone_35",
+    "right_upper_leg": "bone_36",
+    "right_lower_leg": "bone_37",
+    "right_foot": "bone_39",
 }
 
 REAL_UNIRIG_52_EDGES = (
@@ -107,6 +139,48 @@ REAL_UNIRIG_52_EDGES = (
     ("bone_50", "bone_51"),
 )
 
+REAL_UNIRIG_40_EDGES = (
+    ("bone_0", "bone_1"),
+    ("bone_1", "bone_2"),
+    ("bone_2", "bone_3"),
+    ("bone_3", "bone_4"),
+    ("bone_4", "bone_5"),
+    ("bone_3", "bone_6"),
+    ("bone_6", "bone_7"),
+    ("bone_7", "bone_8"),
+    ("bone_8", "bone_9"),
+    ("bone_9", "bone_10"),
+    ("bone_10", "bone_11"),
+    ("bone_11", "bone_12"),
+    ("bone_9", "bone_13"),
+    ("bone_13", "bone_14"),
+    ("bone_14", "bone_15"),
+    ("bone_9", "bone_16"),
+    ("bone_16", "bone_17"),
+    ("bone_17", "bone_18"),
+    ("bone_3", "bone_19"),
+    ("bone_19", "bone_20"),
+    ("bone_20", "bone_21"),
+    ("bone_21", "bone_22"),
+    ("bone_22", "bone_23"),
+    ("bone_23", "bone_24"),
+    ("bone_24", "bone_25"),
+    ("bone_22", "bone_26"),
+    ("bone_26", "bone_27"),
+    ("bone_27", "bone_28"),
+    ("bone_22", "bone_29"),
+    ("bone_29", "bone_30"),
+    ("bone_30", "bone_31"),
+    ("bone_0", "bone_32"),
+    ("bone_32", "bone_33"),
+    ("bone_33", "bone_34"),
+    ("bone_34", "bone_35"),
+    ("bone_0", "bone_36"),
+    ("bone_36", "bone_37"),
+    ("bone_37", "bone_38"),
+    ("bone_38", "bone_39"),
+)
+
 
 class TopologyProfileError(ValueError):
     pass
@@ -114,8 +188,20 @@ class TopologyProfileError(ValueError):
 
 def build_declared_data_from_known_profile(glb_json: dict[str, Any]) -> dict[str, Any]:
     nodes = _nodes_with_parents(glb_json)
-    if _matches_real_unirig_52_profile(glb_json, nodes):
-        return _build_real_unirig_52_declared_data(glb_json, nodes)
+    if _matches_real_unirig_bone_profile(glb_json, nodes, joint_count=52, required_edges=REAL_UNIRIG_52_EDGES):
+        return _build_real_unirig_bone_declared_data(
+            glb_json,
+            nodes,
+            role_map=REAL_UNIRIG_52_ROLE_MAP,
+            profile_id="unirig-anonymous-bone-52",
+        )
+    if _matches_real_unirig_bone_profile(glb_json, nodes, joint_count=40, required_edges=REAL_UNIRIG_40_EDGES):
+        return _build_real_unirig_bone_declared_data(
+            glb_json,
+            nodes,
+            role_map=REAL_UNIRIG_40_ROLE_MAP,
+            profile_id="unirig-anonymous-bone-40",
+        )
 
     fingerprint = _fingerprint(glb_json)
     if fingerprint != _known_minimal_fingerprint():
@@ -155,23 +241,29 @@ def build_declared_data_from_known_profile(glb_json: dict[str, Any]) -> dict[str
     }
 
 
-def _matches_real_unirig_52_profile(glb_json: dict[str, Any], nodes: list[dict[str, Any]]) -> bool:
+def _matches_real_unirig_bone_profile(
+    glb_json: dict[str, Any],
+    nodes: list[dict[str, Any]],
+    *,
+    joint_count: int,
+    required_edges: tuple[tuple[str, str], ...],
+) -> bool:
     skins = glb_json.get("skins") if isinstance(glb_json.get("skins"), list) else []
     if len(skins) != 1 or not isinstance(skins[0], dict):
         return False
     joints = skins[0].get("joints") if isinstance(skins[0].get("joints"), list) else []
-    if len(joints) != 52:
+    if len(joints) != joint_count:
         return False
     if any(not isinstance(index, int) or index < 0 or index >= len(nodes) for index in joints):
         return False
-    expected_names = [f"bone_{number}" for number in range(52)]
+    expected_names = [f"bone_{number}" for number in range(joint_count)]
     if [str(nodes[index].get("name") or "") for index in joints] != expected_names:
         return False
 
     index_by_name = {str(node.get("name") or ""): index for index, node in enumerate(nodes)}
     if any(index_by_name.get(name) is None for name in expected_names):
         return False
-    for parent, child in REAL_UNIRIG_52_EDGES:
+    for parent, child in required_edges:
         child_index = index_by_name[child]
         parent_index = index_by_name[parent]
         if nodes[child_index].get("parent_index") != parent_index:
@@ -179,7 +271,13 @@ def _matches_real_unirig_52_profile(glb_json: dict[str, Any], nodes: list[dict[s
     return True
 
 
-def _build_real_unirig_52_declared_data(glb_json: dict[str, Any], nodes: list[dict[str, Any]]) -> dict[str, Any]:
+def _build_real_unirig_bone_declared_data(
+    glb_json: dict[str, Any],
+    nodes: list[dict[str, Any]],
+    *,
+    role_map: dict[str, str],
+    profile_id: str,
+) -> dict[str, Any]:
     local_by_index = [_local_matrix(node) for node in nodes]
     world_by_index: dict[int, list[list[float]]] = {}
     for index in range(len(nodes)):
@@ -200,16 +298,16 @@ def _build_real_unirig_52_declared_data(glb_json: dict[str, Any], nodes: list[di
             }
         )
     fingerprint = _fingerprint(glb_json)
-    role_confidence = {role: 1.0 for role in REAL_UNIRIG_52_ROLE_MAP}
+    role_confidence = {role: 1.0 for role in role_map}
     return {
-        "roles": dict(REAL_UNIRIG_52_ROLE_MAP),
+        "roles": dict(role_map),
         "nodes": declared_nodes,
         "basis": {"up": "Y", "forward": "Z", "handedness": "right", "status": "inferred"},
         "confidence": {"roles": role_confidence},
         "provenance": {
             "source": "known-unirig-topology-profile",
             "method": "exact-bounded-bone-name-topology",
-            "profile_id": "unirig-anonymous-bone-52",
+            "profile_id": profile_id,
             "topology_fingerprint_sha256": fingerprint,
         },
     }

@@ -42,6 +42,16 @@ OPTIONAL_TOE_ROLES = {
     "right_leg": "right_toe",
 }
 
+OPTIONAL_SHOULDER_ROLE_ALIASES = {
+    "left_shoulder": ("left_shoulder", "left_clavicle"),
+    "right_shoulder": ("right_shoulder", "right_clavicle"),
+}
+
+OPTIONAL_PROXIMAL_ARM_CHAINS = {
+    "left_arm_proximal": ("left_shoulder", "left_upper_arm", "left_lower_arm", "left_hand"),
+    "right_arm_proximal": ("right_shoulder", "right_upper_arm", "right_lower_arm", "right_hand"),
+}
+
 OPTIONAL_FINGER_CHAINS = {
     "left_thumb": ("left_thumb_1", "left_thumb_2", "left_thumb_3"),
     "left_index": ("left_index_1", "left_index_2", "left_index_3"),
@@ -89,19 +99,23 @@ def build_contract_from_declared_data(declared: dict[str, Any], *, source_hash: 
             raise HumanoidContractError(f"Required humanoid role '{role}' references unknown node '{node_id}'.")
         required_roles[role] = node_id
 
+    optional_roles = _build_optional_shoulder_roles(roles, nodes)
+
     chains = _build_required_chains(required_roles)
+    _append_optional_proximal_arm_chains(chains, required_roles, optional_roles)
     _append_optional_toe_chains(chains, roles, nodes)
     warnings = _build_optional_finger_chains(chains, roles, nodes)
     basis = _build_basis(declared.get("basis"))
     if basis["status"] == "inferred":
         warnings.append(_warning(WARNING_BASIS_INFERRED, "Coordinate basis is inferred rather than asserted by the source metadata."))
 
-    confidence = _build_confidence(declared.get("confidence"), required_roles=required_roles, chains=chains)
+    confidence = _build_confidence(declared.get("confidence"), required_roles=required_roles, optional_roles=optional_roles, chains=chains)
     provenance = _build_provenance(declared.get("provenance"))
 
     contract = {
         "schema": HUMANOID_SCHEMA,
         "required_roles": required_roles,
+        "optional_roles": optional_roles,
         "chains": chains,
         "nodes": nodes,
         "basis": basis,
@@ -135,6 +149,15 @@ def validate_humanoid_contract(contract: dict) -> None:
             raise HumanoidContractError(f"Missing required humanoid role '{role}' in contract.")
         if node_id not in nodes:
             raise HumanoidContractError(f"Required humanoid role '{role}' references unknown node '{node_id}'.")
+
+    optional_roles = contract.get("optional_roles", {})
+    if not isinstance(optional_roles, dict):
+        raise HumanoidContractError("Humanoid contract optional_roles must be a mapping when present.")
+    for role, node_id in optional_roles.items():
+        if role not in OPTIONAL_SHOULDER_ROLE_ALIASES:
+            raise HumanoidContractError(f"Unsupported optional humanoid role '{role}'.")
+        if not isinstance(node_id, str) or node_id not in nodes:
+            raise HumanoidContractError(f"Optional humanoid role '{role}' references unknown node '{node_id}'.")
 
     chains = contract.get("chains")
     if not isinstance(chains, dict):
@@ -220,6 +243,36 @@ def _build_required_chains(required_roles: dict[str, str]) -> dict[str, list[str
     return {name: [required_roles[role] for role in roles] for name, roles in REQUIRED_CHAINS.items()}
 
 
+def _build_optional_shoulder_roles(roles: dict[str, Any], nodes: dict[str, dict]) -> dict[str, str]:
+    optional_roles: dict[str, str] = {}
+    for canonical_role, aliases in OPTIONAL_SHOULDER_ROLE_ALIASES.items():
+        node_id = None
+        for alias in aliases:
+            value = roles.get(alias)
+            if value is not None:
+                node_id = value
+                break
+        if node_id is None:
+            continue
+        if not isinstance(node_id, str) or node_id not in nodes:
+            raise HumanoidContractError(f"Optional humanoid role '{canonical_role}' references unknown node '{node_id}'.")
+        optional_roles[canonical_role] = node_id
+    return optional_roles
+
+
+def _append_optional_proximal_arm_chains(
+    chains: dict[str, list[str]],
+    required_roles: dict[str, str],
+    optional_roles: dict[str, str],
+) -> None:
+    for chain_name, role_names in OPTIONAL_PROXIMAL_ARM_CHAINS.items():
+        shoulder_role = role_names[0]
+        shoulder_node = optional_roles.get(shoulder_role)
+        if shoulder_node is None:
+            continue
+        chains[chain_name] = [shoulder_node, *(required_roles[role] for role in role_names[1:])]
+
+
 def _append_optional_toe_chains(chains: dict[str, list[str]], roles: dict[str, Any], nodes: dict[str, dict]) -> None:
     for chain_name, role in OPTIONAL_TOE_ROLES.items():
         node_id = roles.get(role)
@@ -275,13 +328,21 @@ def _build_basis(raw_basis: Any) -> dict:
     }
 
 
-def _build_confidence(raw_confidence: Any, *, required_roles: dict[str, str], chains: dict[str, list[str]]) -> dict:
+def _build_confidence(
+    raw_confidence: Any,
+    *,
+    required_roles: dict[str, str],
+    optional_roles: dict[str, str],
+    chains: dict[str, list[str]],
+) -> dict:
     source = raw_confidence if isinstance(raw_confidence, dict) else {}
     role_source = source.get("roles") if isinstance(source.get("roles"), dict) else {}
     chain_source = source.get("chains") if isinstance(source.get("chains"), dict) else {}
-    roles = {role: float(role_source.get(role, 1.0)) for role in required_roles}
+    all_roles = set(required_roles) | set(optional_roles)
+    roles = {role: float(role_source.get(role, 1.0)) for role in sorted(all_roles)}
     chain_confidence = {name: float(chain_source.get(name, 1.0)) for name in chains}
-    return {"minimum_required": MINIMUM_CONFIDENCE, "roles": roles, "chains": chain_confidence, "overall": min(roles.values())}
+    required_values = [roles[role] for role in required_roles]
+    return {"minimum_required": MINIMUM_CONFIDENCE, "roles": roles, "chains": chain_confidence, "overall": min(required_values)}
 
 
 def _build_provenance(raw_provenance: Any) -> dict:

@@ -17,7 +17,8 @@ if str(TESTS) not in sys.path:
     sys.path.insert(0, str(TESTS))
 
 from test_metadata import complete_humanoid_source
-from fixtures.unirig_real_topology import real_unirig_52_payload
+from fixtures.unirig_real_topology import real_unirig_40_payload, real_unirig_52_payload
+from unirig_ext.humanoid_contract import build_contract_from_declared_data
 from unirig_ext.humanoid_source import HumanoidResolutionFailure, resolve_humanoid_source
 
 
@@ -70,18 +71,32 @@ class HumanoidSourceTests(unittest.TestCase):
             with self.assertRaisesRegex(HumanoidResolutionFailure, "companion.*JSON object"):
                 resolve_humanoid_source(output_path)
 
-    def test_real_unirig_52_bone_profile_resolves_as_topology_source(self) -> None:
+    def test_real_unirig_52_bone_profile_resolves_as_semantic_source(self) -> None:
         with tempfile.TemporaryDirectory(prefix="unirig-source-") as temp_dir:
             output_path = Path(temp_dir) / "avatar_unirig.glb"
             write_glb_json(output_path, real_unirig_52_payload())
 
             resolved = resolve_humanoid_source(output_path)
 
-            self.assertEqual(resolved.kind, "topology_profile")
-            self.assertEqual(resolved.provenance["profile_id"], "unirig-anonymous-bone-52")
+            self.assertEqual(resolved.kind, "semantic_resolver")
+            self.assertEqual(resolved.provenance["method"], "semantic-graph-rest-symmetry")
             self.assertEqual(resolved.payload["roles"]["hips"], "bone_0")
             self.assertEqual(resolved.payload["roles"]["right_foot"], "bone_51")
-            self.assertEqual(resolved.warnings[0]["code"], "humanoid_source_from_bounded_topology_profile")
+            self.assertEqual(resolved.warnings[0]["code"], "humanoid_source_from_semantic_resolver")
+
+    def test_real_unirig_40_bone_profile_resolves_as_contract_ready_semantic_source(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="unirig-source-") as temp_dir:
+            output_path = Path(temp_dir) / "avatar_unirig.glb"
+            write_glb_json(output_path, real_unirig_40_payload())
+
+            resolved = resolve_humanoid_source(output_path)
+            contract = build_contract_from_declared_data(resolved.payload, source_hash="0" * 64, output_hash="1" * 64)
+
+            self.assertEqual(resolved.kind, "semantic_resolver")
+            self.assertEqual(resolved.provenance["method"], "semantic-graph-rest-symmetry")
+            self.assertEqual(contract["required_roles"]["right_hand"], "bone_22")
+            self.assertEqual(contract["optional_roles"]["right_shoulder"], "bone_19")
+            self.assertEqual(resolved.warnings[0]["code"], "humanoid_source_from_semantic_resolver")
 
 
 if __name__ == "__main__":
