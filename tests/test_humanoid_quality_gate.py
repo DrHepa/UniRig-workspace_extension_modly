@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -15,6 +16,7 @@ if str(SRC) not in sys.path:
 
 from unirig_ext.gltf_skin_analysis import read_glb_container
 from unirig_ext.humanoid_quality_gate import HumanoidQualityGateError, run_humanoid_quality_gate
+from unirig_ext.semantic_body_graph import build_semantic_body_report
 
 
 COMPONENT_FLOAT = 5126
@@ -159,6 +161,8 @@ class HumanoidQualityGateTests(unittest.TestCase):
             report = run_humanoid_quality_gate(read_glb_container(glb), _declared_roles())
 
             self.assertEqual(report.status, "passed")
+            self.assertEqual(report.diagnostic["semantic_body_graph"]["publishable"], True)
+            self.assertEqual(report.diagnostic["semantic_body_graph"]["predicates"]["has_clear_spine"], True)
             self.assertEqual(report.diagnostic["joint_classes"]["left_hand"], "body")
             self.assertEqual(report.diagnostic["weight_summary"]["vertex_count"], 8)
 
@@ -180,6 +184,7 @@ class HumanoidQualityGateTests(unittest.TestCase):
 
             diagnostics = raised.exception.diagnostic
             self.assertIn("non_anatomical_leaf_under_arm", {reason["code"] for reason in diagnostics["reasons"]})
+            self.assertIn("semantic_passive_noncontract_subtree", {reason["code"] for reason in diagnostics["reasons"]})
             self.assertEqual(diagnostics["joint_classes"]["left_watch_leaf"], "accessory")
 
     def test_non_local_hand_weights_fail_closed_with_spread_diagnostic(self) -> None:
@@ -216,6 +221,19 @@ class HumanoidQualityGateTests(unittest.TestCase):
             self.assertEqual(joint_classes["left_hair_strand"], "hair")
             self.assertEqual(joint_classes["left_watch_leaf"], "accessory")
             self.assertEqual(joint_classes["unused"], "unknown")
+
+    def test_quality_gate_reuses_provided_semantic_report_instead_of_rebuilding_graph(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="unirig-qgate-") as temp_dir:
+            container = read_glb_container(write_embedded_skin_glb(Path(temp_dir) / "clean.glb"))
+            declared = _declared_roles()
+            semantic_report = build_semantic_body_report(container, declared)
+
+            with patch("unirig_ext.humanoid_quality_gate.build_semantic_body_report") as builder:
+                report = run_humanoid_quality_gate(container, declared, semantic_report=semantic_report)
+
+            builder.assert_not_called()
+            self.assertEqual(report.status, "passed")
+            self.assertEqual(report.diagnostic["semantic_body_graph"], semantic_report.as_diagnostic())
 
 
 def _declared_roles() -> dict:

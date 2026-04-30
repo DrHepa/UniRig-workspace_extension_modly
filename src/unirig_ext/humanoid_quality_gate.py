@@ -3,7 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from .gltf_skin_analysis import GlbContainer, GltfSkinAnalysisError, has_skinned_mesh_primitives, iter_weighted_vertices
+from .gltf_skin_analysis import GlbContainer, GltfSkinAnalysisError, JointWeightSummary, has_skinned_mesh_primitives, summarize_joint_weights
+from .semantic_body_graph import SemanticBodyReport, build_semantic_body_report
 from .semantic_humanoid_resolver import JointGraph, extract_joint_graph
 
 
@@ -22,44 +23,7 @@ class HumanoidQualityReport:
     diagnostic: dict[str, Any]
 
 
-@dataclass
-class JointWeightSummary:
-    count: int = 0
-    total_weight: float = 0.0
-    min_x: float = float("inf")
-    min_y: float = float("inf")
-    min_z: float = float("inf")
-    max_x: float = float("-inf")
-    max_y: float = float("-inf")
-    max_z: float = float("-inf")
-
-    def add(self, position: tuple[float, float, float], weight: float) -> None:
-        self.count += 1
-        self.total_weight += weight
-        x, y, z = position
-        self.min_x = min(self.min_x, x)
-        self.min_y = min(self.min_y, y)
-        self.min_z = min(self.min_z, z)
-        self.max_x = max(self.max_x, x)
-        self.max_y = max(self.max_y, y)
-        self.max_z = max(self.max_z, z)
-
-    def as_diagnostic(self) -> dict[str, Any]:
-        if self.count == 0:
-            return {"count": 0, "total_weight": 0.0}
-        bbox = [[self.min_x, self.min_y, self.min_z], [self.max_x, self.max_y, self.max_z]]
-        center = [(bbox[0][axis] + bbox[1][axis]) / 2.0 for axis in range(3)]
-        spread = [bbox[1][axis] - bbox[0][axis] for axis in range(3)]
-        return {
-            "count": self.count,
-            "total_weight": round(self.total_weight, 6),
-            "bbox": [[round(value, 6) for value in point] for point in bbox],
-            "center": [round(value, 6) for value in center],
-            "spread": [round(value, 6) for value in spread],
-        }
-
-
-def run_humanoid_quality_gate(container: GlbContainer, declared: dict[str, Any]) -> HumanoidQualityReport:
+def run_humanoid_quality_gate(container: GlbContainer, declared: dict[str, Any], *, semantic_report: SemanticBodyReport | None = None) -> HumanoidQualityReport:
     if not has_skinned_mesh_primitives(container.json):
         return HumanoidQualityReport(
             status="not_applicable",
@@ -69,14 +33,20 @@ def run_humanoid_quality_gate(container: GlbContainer, declared: dict[str, Any])
                 "reason": "skin_weight_data_not_present",
             },
         )
+    try:
+        semantic_report = semantic_report or build_semantic_body_report(container, declared)
+    except GltfSkinAnalysisError as exc:
+        _raise_skin_weight_unavailable(exc)
     graph = extract_joint_graph(container.json)
     roles = declared.get("roles") if isinstance(declared.get("roles"), dict) else {}
     summaries, weight_summary = _summarize_weights(container)
-    joint_classes = _classify_joints(graph, roles, summaries)
+    joint_classes = _classify_joints_from_semantic_report(semantic_report, graph) if semantic_report is not None else _classify_joints(graph, roles, summaries)
     reasons: list[dict[str, Any]] = []
-    reasons.extend(_arm_branch_reasons(graph, roles, joint_classes, summaries))
+    if semantic_report is None:
+        reasons.extend(_arm_branch_reasons(graph, roles, joint_classes, summaries))
     reasons.extend(_non_local_weight_reasons(graph, roles, summaries, weight_summary))
-    reasons.extend(_high_region_reasons(roles, summaries, weight_summary))
+    if semantic_report is None:
+        reasons.extend(_high_region_reasons(roles, summaries, weight_summary))
     unknown_selected = sorted(role for role, joint in roles.items() if joint_classes.get(str(joint)) in {"unknown", "clothing", "hair", "accessory"})
     if unknown_selected:
         reasons.append(
@@ -86,12 +56,19 @@ def run_humanoid_quality_gate(container: GlbContainer, declared: dict[str, Any])
                 "roles": unknown_selected,
             }
         )
+    semantic_diagnostic = semantic_report.as_diagnostic()
+    for reason in semantic_diagnostic.get("reasons", []):
+        if reason not in reasons:
+            reasons.append(reason)
+    if not semantic_report.publishable and not reasons:
+        reasons.extend(semantic_diagnostic.get("reasons", []))
     diagnostic = {
         "code": "humanoid_rig_quality_gate",
         "status": "passed" if not reasons else "failed",
         "joint_classes": dict(sorted(joint_classes.items())),
         "weight_summary": weight_summary,
         "weighted_joints": {joint: summaries[joint].as_diagnostic() for joint in sorted(summaries)},
+        "semantic_body_graph": semantic_diagnostic,
         "checks": ["skin_weight_data", "arm_branch_separation", "non_local_weight_spread", "high_region_influences"],
     }
     if reasons:
@@ -102,6 +79,7 @@ def run_humanoid_quality_gate(container: GlbContainer, declared: dict[str, Any])
             "joint_classes": diagnostic["joint_classes"],
             "weight_summary": diagnostic["weight_summary"],
             "weighted_joints": diagnostic["weighted_joints"],
+            "semantic_body_graph": semantic_diagnostic,
             "remediation": "Provide explicit humanoid source without garment/accessory skin joints or separate clothing/hair before humanoid metadata export.",
         }
         raise HumanoidQualityGateError(failure)
@@ -109,42 +87,22 @@ def run_humanoid_quality_gate(container: GlbContainer, declared: dict[str, Any])
 
 
 def _summarize_weights(container: GlbContainer) -> tuple[dict[str, JointWeightSummary], dict[str, Any]]:
-    summaries: dict[str, JointWeightSummary] = {}
-    vertex_count = 0
-    influenced_vertices = 0
-    min_y = float("inf")
-    max_y = float("-inf")
     try:
-        vertices = list(iter_weighted_vertices(container))
+        return summarize_joint_weights(container, weight_epsilon=WEIGHT_EPSILON)
     except GltfSkinAnalysisError as exc:
-        failure = {
-            "code": "unsafe_for_humanoid_retarget",
-            "severity": "error",
-            "reasons": [{"code": "skin_weight_data_unavailable", "message": str(exc)}],
-            "joint_classes": {},
-            "weight_summary": {"vertex_count": 0},
-            "remediation": "Export an embedded GLB with POSITION, JOINTS_0, WEIGHTS_0, and one skin, or avoid metadata_mode=humanoid.",
-        }
-        raise HumanoidQualityGateError(failure) from exc
-    for vertex in vertices:
-        vertex_count += 1
-        min_y = min(min_y, vertex.position[1])
-        max_y = max(max_y, vertex.position[1])
-        if vertex.influences:
-            influenced_vertices += 1
-        for joint, weight in vertex.influences:
-            if weight < WEIGHT_EPSILON:
-                continue
-            summaries.setdefault(joint, JointWeightSummary()).add(vertex.position, weight)
-    if vertex_count == 0:
-        raise HumanoidQualityGateError({"code": "unsafe_for_humanoid_retarget", "severity": "error", "reasons": [{"code": "skin_weight_data_unavailable", "message": "No weighted vertices were available."}], "joint_classes": {}, "weight_summary": {"vertex_count": 0}})
-    return summaries, {
-        "vertex_count": vertex_count,
-        "influenced_vertices": influenced_vertices,
-        "height_min": round(min_y, 6),
-        "height_max": round(max_y, 6),
-        "height": round(max_y - min_y, 6),
+        _raise_skin_weight_unavailable(exc)
+
+
+def _raise_skin_weight_unavailable(exc: GltfSkinAnalysisError) -> None:
+    failure = {
+        "code": "unsafe_for_humanoid_retarget",
+        "severity": "error",
+        "reasons": [{"code": "skin_weight_data_unavailable", "message": str(exc)}],
+        "joint_classes": {},
+        "weight_summary": {"vertex_count": 0},
+        "remediation": "Export an embedded GLB with POSITION, JOINTS_0, WEIGHTS_0, and one skin, or avoid metadata_mode=humanoid.",
     }
+    raise HumanoidQualityGateError(failure) from exc
 
 
 def _classify_joints(graph: JointGraph, roles: dict[str, Any], summaries: dict[str, JointWeightSummary]) -> dict[str, str]:
@@ -161,6 +119,27 @@ def _classify_joints(graph: JointGraph, roles: dict[str, Any], summaries: dict[s
     for joint in graph.joints:
         if joint in role_joints:
             classes[joint] = "body"
+    return classes
+
+
+def _classify_joints_from_semantic_report(semantic_report: SemanticBodyReport, graph: JointGraph) -> dict[str, str]:
+    classes: dict[str, str] = {}
+    for joint in graph.joints:
+        node = semantic_report.nodes.get(joint)
+        if node is None:
+            classes[joint] = "unknown"
+            continue
+        node_classes = set(node.classes)
+        if node.is_contract_candidate:
+            classes[joint] = "body"
+        elif "hair" in node_classes:
+            classes[joint] = "hair"
+        elif "clothing" in node_classes:
+            classes[joint] = "clothing"
+        elif "accessory" in node_classes:
+            classes[joint] = "accessory"
+        else:
+            classes[joint] = "unknown"
     return classes
 
 

@@ -36,6 +36,43 @@ class WeightedVertex:
     influences: tuple[tuple[str, float], ...]
 
 
+@dataclass
+class JointWeightSummary:
+    count: int = 0
+    total_weight: float = 0.0
+    min_x: float = float("inf")
+    min_y: float = float("inf")
+    min_z: float = float("inf")
+    max_x: float = float("-inf")
+    max_y: float = float("-inf")
+    max_z: float = float("-inf")
+
+    def add(self, position: tuple[float, float, float], weight: float) -> None:
+        self.count += 1
+        self.total_weight += weight
+        x, y, z = position
+        self.min_x = min(self.min_x, x)
+        self.min_y = min(self.min_y, y)
+        self.min_z = min(self.min_z, z)
+        self.max_x = max(self.max_x, x)
+        self.max_y = max(self.max_y, y)
+        self.max_z = max(self.max_z, z)
+
+    def as_diagnostic(self) -> dict[str, Any]:
+        if self.count == 0:
+            return {"count": 0, "total_weight": 0.0}
+        bbox = [[self.min_x, self.min_y, self.min_z], [self.max_x, self.max_y, self.max_z]]
+        center = [(bbox[0][axis] + bbox[1][axis]) / 2.0 for axis in range(3)]
+        spread = [bbox[1][axis] - bbox[0][axis] for axis in range(3)]
+        return {
+            "count": self.count,
+            "total_weight": round(self.total_weight, 6),
+            "bbox": [[round(value, 6) for value in point] for point in bbox],
+            "center": [round(value, 6) for value in center],
+            "spread": [round(value, 6) for value in spread],
+        }
+
+
 def read_glb_container(path: Path) -> GlbContainer:
     data = path.read_bytes()
     if len(data) < 20 or data[:4] != b"glTF":
@@ -106,6 +143,33 @@ def iter_weighted_vertices(container: GlbContainer) -> Iterable[WeightedVertex]:
             yield WeightedVertex(position=(float(position[0]), float(position[1]), float(position[2])), influences=tuple(influences))
     if not emitted:
         raise GltfSkinAnalysisError("skin_weight_data_unavailable: no mesh primitive with skin weight attributes was found.")
+
+
+def summarize_joint_weights(container: GlbContainer, *, weight_epsilon: float = 0.01) -> tuple[dict[str, JointWeightSummary], dict[str, Any]]:
+    summaries: dict[str, JointWeightSummary] = {}
+    vertex_count = 0
+    influenced_vertices = 0
+    min_y = float("inf")
+    max_y = float("-inf")
+    for vertex in iter_weighted_vertices(container):
+        vertex_count += 1
+        min_y = min(min_y, vertex.position[1])
+        max_y = max(max_y, vertex.position[1])
+        if vertex.influences:
+            influenced_vertices += 1
+        for joint, weight in vertex.influences:
+            if weight < weight_epsilon:
+                continue
+            summaries.setdefault(joint, JointWeightSummary()).add(vertex.position, weight)
+    if vertex_count == 0:
+        raise GltfSkinAnalysisError("skin_weight_data_unavailable: no weighted vertices were available.")
+    return summaries, {
+        "vertex_count": vertex_count,
+        "influenced_vertices": influenced_vertices,
+        "height_min": round(min_y, 6),
+        "height_max": round(max_y, 6),
+        "height": round(max_y - min_y, 6),
+    }
 
 
 def read_accessor(container: GlbContainer, accessor_index: int) -> list[tuple[float | int, ...]]:

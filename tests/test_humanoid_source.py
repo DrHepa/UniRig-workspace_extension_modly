@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -19,8 +20,9 @@ if str(TESTS) not in sys.path:
 from test_metadata import complete_humanoid_source
 from fixtures.unirig_real_topology import real_unirig_40_payload, real_unirig_52_payload
 from unirig_ext.humanoid_contract import build_contract_from_declared_data
-from unirig_ext.humanoid_source import HumanoidResolutionFailure, resolve_humanoid_source
+from unirig_ext.humanoid_source import HumanoidResolutionFailure, resolve_explicit_humanoid_source, resolve_humanoid_source
 from test_humanoid_quality_gate import _declared_roles, write_embedded_skin_glb
+from unirig_ext.semantic_body_graph import build_semantic_body_report
 
 
 def write_glb_json(target: Path, payload: dict) -> Path:
@@ -116,6 +118,7 @@ class HumanoidSourceTests(unittest.TestCase):
 
             self.assertEqual(resolved.kind, "companion")
             self.assertEqual(resolved.provenance["quality_gate"]["status"], "passed")
+            self.assertEqual(resolved.provenance["quality_gate"]["semantic_body_graph"]["publishable"], True)
             self.assertEqual(resolved.provenance["quality_gate"]["joint_classes"]["left_hand"], "body")
 
     def test_sleeved_embedded_skin_blocks_humanoid_source_before_contract(self) -> None:
@@ -138,6 +141,7 @@ class HumanoidSourceTests(unittest.TestCase):
                 resolve_humanoid_source(output_path)
 
             diagnostic = json.loads(str(raised.exception))
+            self.assertIn("semantic_body_graph", diagnostic)
             self.assertEqual(diagnostic["joint_classes"]["left_sleeve"], "clothing")
             self.assertEqual(diagnostic["weight_summary"]["vertex_count"], 9)
 
@@ -163,6 +167,50 @@ class HumanoidSourceTests(unittest.TestCase):
             message = str(raised.exception)
             self.assertIn("joint_classes", message)
             self.assertIn("weight_summary", message)
+
+    def test_readable_companion_glb_builds_semantic_evidence_once_for_source_and_gate(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="unirig-source-") as temp_dir:
+            output_path = write_embedded_skin_glb(Path(temp_dir) / "avatar_unirig.glb")
+            output_path.with_name("avatar_unirig.humanoid.json").write_text(json.dumps(_declared_roles()), encoding="utf-8")
+
+            with patch("unirig_ext.humanoid_source.build_semantic_body_report", wraps=build_semantic_body_report) as builder:
+                resolved = resolve_humanoid_source(output_path)
+
+            self.assertEqual(builder.call_count, 1)
+            self.assertEqual(resolved.kind, "companion")
+            self.assertEqual(resolved.provenance["quality_gate"]["semantic_body_graph"]["publishable"], True)
+
+    def test_readable_extras_glb_builds_semantic_evidence_once_for_source_and_gate(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="unirig-source-") as temp_dir:
+            output_path = write_embedded_skin_glb(Path(temp_dir) / "avatar_unirig.glb", extras={"unirig_humanoid": _declared_roles()})
+
+            with patch("unirig_ext.humanoid_source.build_semantic_body_report", wraps=build_semantic_body_report) as builder:
+                resolved = resolve_humanoid_source(output_path)
+
+            self.assertEqual(builder.call_count, 1)
+            self.assertEqual(resolved.kind, "glb_extras")
+            self.assertEqual(resolved.provenance["quality_gate"]["semantic_body_graph"]["publishable"], True)
+
+    def test_readable_provided_source_builds_semantic_evidence_once_for_source_and_gate(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="unirig-source-") as temp_dir:
+            output_path = write_embedded_skin_glb(Path(temp_dir) / "avatar_unirig.glb")
+
+            with patch("unirig_ext.humanoid_source.build_semantic_body_report", wraps=build_semantic_body_report) as builder:
+                resolved = resolve_explicit_humanoid_source(output_path, _declared_roles())
+
+            self.assertEqual(builder.call_count, 1)
+            self.assertEqual(resolved.kind, "provided")
+            self.assertEqual(resolved.provenance["safe_retargeting_evidence"], "quality_gate_passed")
+
+    def test_readable_semantic_resolver_failure_builds_semantic_evidence_once_for_gate(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="unirig-source-") as temp_dir:
+            output_path = write_embedded_skin_glb(Path(temp_dir) / "avatar_unirig.glb", sleeve=True, semantic_connected=True)
+
+            with patch("unirig_ext.humanoid_source.build_semantic_body_report", wraps=build_semantic_body_report) as builder:
+                with self.assertRaisesRegex(HumanoidResolutionFailure, "unsafe_for_humanoid_retarget.*sleeve_branch_under_arm"):
+                    resolve_humanoid_source(output_path)
+
+            self.assertEqual(builder.call_count, 1)
 
 
 if __name__ == "__main__":

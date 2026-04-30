@@ -127,7 +127,15 @@ def extract_joint_graph(glb_json: dict[str, Any]) -> JointGraph:
     )
 
 
-def resolve_humanoid(glb_json: dict[str, Any], *, min_role: float = 0.75, min_total: float = 0.80) -> dict[str, Any]:
+def resolve_humanoid(
+    glb_json: dict[str, Any],
+    *,
+    min_role: float = 0.75,
+    min_total: float = 0.80,
+    semantic_report: Any | None = None,
+) -> dict[str, Any]:
+    if semantic_report is not None:
+        return _resolve_from_semantic_report(glb_json, semantic_report, min_role=min_role, min_total=min_total)
     graph = extract_joint_graph(glb_json)
     roles: dict[str, str] = {}
     confidence: dict[str, float] = {}
@@ -180,6 +188,75 @@ def resolve_humanoid(glb_json: dict[str, Any], *, min_role: float = 0.75, min_to
         },
         "diagnostics": warnings,
     }
+
+
+def _resolve_from_semantic_report(glb_json: dict[str, Any], semantic_report: Any, *, min_role: float, min_total: float) -> dict[str, Any]:
+    diagnostic = semantic_report.as_diagnostic() if hasattr(semantic_report, "as_diagnostic") else {}
+    if not getattr(semantic_report, "publishable", False):
+        _fail(
+            "semantic_body_graph_not_publishable",
+            "Semantic body graph evidence is not publishable for humanoid contract derivation.",
+            semantic_body_graph=diagnostic,
+        )
+    roles = dict(getattr(semantic_report, "core_roles", {}) or {})
+    missing = [role for role in REQUIRED_ROLES if role not in roles]
+    if missing:
+        _fail(
+            "semantic_required_roles_missing",
+            "Semantic body graph did not provide all required humanoid roles.",
+            roles=missing,
+            semantic_body_graph=diagnostic,
+        )
+    nodes_by_id = getattr(semantic_report, "nodes", {}) or {}
+    role_confidence = {
+        role: round(float(getattr(nodes_by_id.get(joint), "confidence", 0.0)), 3)
+        for role, joint in roles.items()
+    }
+    low = [role for role in REQUIRED_ROLES if role_confidence.get(role, 0.0) < min_role]
+    overall = min(float(getattr(semantic_report, "contract_core_confidence", 0.0)), min((role_confidence.get(role, 0.0) for role in REQUIRED_ROLES), default=0.0))
+    if low or overall < min_total:
+        _fail(
+            "semantic_confidence_below_threshold",
+            "Semantic body graph role confidence is below resolver thresholds.",
+            roles=low,
+            overall=overall,
+            semantic_body_graph=diagnostic,
+        )
+    return {
+        "roles": roles,
+        "nodes": _declared_nodes_from_report(nodes_by_id),
+        "basis": {"up": "Y", "forward": "Z", "handedness": "right", "status": "inferred"},
+        "confidence": {"roles": dict(sorted(role_confidence.items())), "overall": round(overall, 3)},
+        "provenance": {
+            "source": "semantic_humanoid_resolver",
+            "method": "semantic-body-report",
+            "topology_fingerprint_sha256": _fingerprint(glb_json),
+        },
+        "diagnostics": [
+            {
+                "code": "semantic_body_report_consumed",
+                "message": "Humanoid roles were derived from precomputed SemanticBodyReport core role evidence.",
+            }
+        ],
+    }
+
+
+def _declared_nodes_from_report(nodes_by_id: dict[str, Any]) -> list[dict[str, Any]]:
+    declared = []
+    for index, node_id in enumerate(sorted(nodes_by_id)):
+        node = nodes_by_id[node_id]
+        declared.append(
+            {
+                "id": node_id,
+                "name": node_id,
+                "index": index,
+                "parent": getattr(node, "parent", None),
+                "rest_local": IDENTITY_4X4,
+                "rest_world": [list(row) for row in getattr(node, "rest_world", IDENTITY_4X4)],
+                "inverse_bind": "unavailable",
+            }
+        )
+    return declared
 
 
 def _resolve_single_root(graph: JointGraph) -> str:

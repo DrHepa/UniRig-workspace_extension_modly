@@ -15,7 +15,10 @@ if str(TESTS) not in sys.path:
     sys.path.insert(0, str(TESTS))
 
 from fixtures.unirig_real_topology import REAL_UNIRIG_40_EDGES, REAL_UNIRIG_52_EDGES, real_unirig_40_payload, real_unirig_52_payload
+from test_humanoid_quality_gate import _declared_roles, write_embedded_skin_glb
+from unirig_ext.gltf_skin_analysis import read_glb_container
 from unirig_ext.humanoid_contract import build_contract_from_declared_data
+from unirig_ext.semantic_body_graph import build_semantic_body_report
 from unirig_ext.semantic_humanoid_resolver import SemanticHumanoidResolutionError, extract_joint_graph, resolve_humanoid
 from unirig_ext.topology_profiles import REAL_UNIRIG_40_ROLE_MAP, REAL_UNIRIG_52_ROLE_MAP
 
@@ -508,6 +511,33 @@ class SemanticHumanoidResolverTests(unittest.TestCase):
     def test_disconnected_or_malformed_skin_fails_closed_before_contract_emission(self) -> None:
         with self.assertRaisesRegex(SemanticHumanoidResolutionError, "semantic_skin_missing"):
             resolve_humanoid({"asset": {"version": "2.0"}, "nodes": [{"name": "only"}], "skins": []})
+
+    def test_optional_semantic_body_report_drives_roles_without_rewalking_topology_heuristics(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory(prefix="unirig-resolver-report-") as temp_dir:
+            glb = write_embedded_skin_glb(Path(temp_dir) / "avatar.glb")
+            container = read_glb_container(glb)
+            semantic_report = build_semantic_body_report(container, _declared_roles())
+
+            declared = resolve_humanoid(container.json, semantic_report=semantic_report)
+
+        self.assertEqual(declared["roles"], semantic_report.core_roles)
+        self.assertEqual(declared["provenance"]["method"], "semantic-body-report")
+        self.assertEqual(declared["confidence"]["overall"], semantic_report.contract_core_confidence)
+
+    def test_optional_nonpublishable_semantic_body_report_fails_before_contract_roles(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory(prefix="unirig-resolver-report-") as temp_dir:
+            glb = write_embedded_skin_glb(Path(temp_dir) / "avatar.glb", sleeve=True)
+            container = read_glb_container(glb)
+            semantic_report = build_semantic_body_report(container, _declared_roles())
+
+            with self.assertRaisesRegex(SemanticHumanoidResolutionError, "semantic_body_graph_not_publishable") as raised:
+                resolve_humanoid(container.json, semantic_report=semantic_report)
+
+        self.assertIn("semantic_body_graph", raised.exception.diagnostics[0])
 
 
 if __name__ == "__main__":

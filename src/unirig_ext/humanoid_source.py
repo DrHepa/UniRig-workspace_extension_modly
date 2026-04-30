@@ -7,8 +7,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .gltf_skin_analysis import GlbContainer, GltfSkinAnalysisError, read_glb_container
+from .gltf_skin_analysis import GlbContainer, GltfSkinAnalysisError, has_skinned_mesh_primitives, read_glb_container
 from .humanoid_quality_gate import HumanoidQualityGateError, run_humanoid_quality_gate
+from .semantic_body_graph import SemanticBodyReport, build_semantic_body_report
 from .semantic_humanoid_resolver import SemanticHumanoidResolutionError, resolve_humanoid
 
 
@@ -36,7 +37,8 @@ def resolve_humanoid_source(output_path: Path) -> ResolvedHumanoidSource:
     companion = output_path.with_name(f"{output_path.stem}.humanoid.json")
     if companion.exists():
         payload = _read_json_file(companion, source_kind="companion")
-        quality_gate = _quality_gate_diagnostic(container, payload)
+        semantic_report = _semantic_report_for(container, payload)
+        quality_gate = _quality_gate_diagnostic(container, payload, semantic_report=semantic_report)
         provenance = {
             "source_kind": "companion",
             "path": str(companion),
@@ -60,7 +62,8 @@ def resolve_humanoid_source(output_path: Path) -> ResolvedHumanoidSource:
                 "GLB extras source extras.unirig_humanoid must be a JSON object. "
                 "Provide a valid companion .humanoid.json or repair the retained extras metadata."
             )
-        quality_gate = _quality_gate_diagnostic(container, declared)
+        semantic_report = _semantic_report_for(container, declared)
+        quality_gate = _quality_gate_diagnostic(container, declared, semantic_report=semantic_report)
         provenance = {
             "source_kind": "glb_extras",
             "path": str(output_path),
@@ -80,7 +83,8 @@ def resolve_humanoid_source(output_path: Path) -> ResolvedHumanoidSource:
         payload = resolve_humanoid(glb_json)
     except SemanticHumanoidResolutionError as exc:
         raise HumanoidResolutionFailure(str(exc)) from exc
-    quality_gate = _quality_gate_diagnostic(container, payload)
+    semantic_report = _semantic_report_for(container, payload)
+    quality_gate = _quality_gate_diagnostic(container, payload, semantic_report=semantic_report)
     provenance = {
         "source_kind": "semantic_resolver",
         "path": str(output_path),
@@ -105,7 +109,8 @@ def resolve_humanoid_source(output_path: Path) -> ResolvedHumanoidSource:
 
 def resolve_explicit_humanoid_source(output_path: Path, humanoid_source: dict[str, Any]) -> ResolvedHumanoidSource:
     container = _try_read_glb_container(output_path)
-    quality_gate = _quality_gate_diagnostic(container, humanoid_source)
+    semantic_report = _semantic_report_for(container, humanoid_source)
+    quality_gate = _quality_gate_diagnostic(container, humanoid_source, semantic_report=semantic_report)
     provenance: dict[str, Any] = {
         "source_kind": "provided",
         "method": "explicit-argument",
@@ -136,11 +141,20 @@ def _try_read_glb_container(output_path: Path) -> GlbContainer | None:
         return None
 
 
-def _quality_gate_diagnostic(container: GlbContainer | None, payload: dict[str, Any]) -> dict[str, Any] | None:
+def _semantic_report_for(container: GlbContainer | None, payload: dict[str, Any]) -> SemanticBodyReport | None:
+    if container is None or not has_skinned_mesh_primitives(container.json):
+        return None
+    try:
+        return build_semantic_body_report(container, payload)
+    except GltfSkinAnalysisError:
+        return None
+
+
+def _quality_gate_diagnostic(container: GlbContainer | None, payload: dict[str, Any], *, semantic_report: SemanticBodyReport | None = None) -> dict[str, Any] | None:
     if container is None:
         return None
     try:
-        report = run_humanoid_quality_gate(container, payload)
+        report = run_humanoid_quality_gate(container, payload, semantic_report=semantic_report)
     except HumanoidQualityGateError as exc:
         raise HumanoidResolutionFailure(json.dumps(exc.diagnostic, sort_keys=True)) from exc
     if report.status == "not_applicable":

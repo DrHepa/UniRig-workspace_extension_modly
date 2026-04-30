@@ -125,7 +125,17 @@ class MetadataSidecarModeTests(unittest.TestCase):
         self.assertNotIn("humanoid_contract", payload)
         self.assertEqual(payload["humanoid_source_kind"], "fallback")
         self.assertEqual(payload["humanoid_provenance"]["diagnostic"]["code"], "unsafe_for_humanoid_retarget")
+        self.assertIn("semantic_body_graph", payload["humanoid_provenance"]["diagnostic"])
         self.assertIn("sleeve_branch_under_arm", {reason["code"] for reason in payload["humanoid_provenance"]["diagnostic"]["reasons"]})
+
+    def test_legacy_mode_suppresses_humanoid_fields_even_with_unsafe_semantic_evidence(self) -> None:
+        write_embedded_skin_glb(self.output_mesh, sleeve=True)
+
+        payload = build_sidecar(self.output_mesh, self.input_mesh, 12345, self.context, metadata_mode="legacy")
+
+        self.assertNotIn("metadata_mode", payload)
+        self.assertNotIn("humanoid_contract", payload)
+        self.assertNotIn("humanoid_provenance", payload)
 
 
 if __name__ == "__main__":
