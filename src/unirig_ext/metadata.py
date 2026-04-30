@@ -8,7 +8,7 @@ from typing import Any
 from .bootstrap import RuntimeContext
 from .io import sha256_file
 from .humanoid_contract import HumanoidContractError, build_contract_from_declared_data
-from .humanoid_source import HumanoidResolutionFailure, resolve_humanoid_source
+from .humanoid_source import HumanoidResolutionFailure, resolve_explicit_humanoid_source, resolve_humanoid_source
 from .metadata_mode import MetadataMode, normalize_metadata_mode
 
 
@@ -104,7 +104,7 @@ def _apply_humanoid_metadata(
         if humanoid_source is None:
             resolved = resolve_humanoid_source(output_path)
         else:
-            resolved = _manual_resolved_source(humanoid_source)
+            resolved = resolve_explicit_humanoid_source(output_path, humanoid_source)
         contract = build_contract_from_declared_data(
             resolved.payload,
             source_hash=source_sha256,
@@ -124,10 +124,13 @@ def _apply_humanoid_metadata(
             "reason": "no_valid_humanoid_source",
             "mode": mode,
         }
+        diagnostic = _extract_unsafe_diagnostic(exc)
+        if diagnostic is not None:
+            payload["humanoid_provenance"]["diagnostic"] = diagnostic
         payload["humanoid_warnings"] = [
             {
                 "code": "humanoid_metadata_unavailable",
-                "message": f"No valid humanoid metadata source was available; wrote legacy-compatible sidecar in metadata_mode={mode}.",
+                "message": _fallback_warning_message(mode, diagnostic),
                 "severity": "warning",
             }
         ]
@@ -142,15 +145,21 @@ def _apply_humanoid_metadata(
     )
 
 
-def _manual_resolved_source(humanoid_source: dict[str, Any]):
-    from types import SimpleNamespace
+def _extract_unsafe_diagnostic(exc: BaseException) -> dict[str, Any] | None:
+    try:
+        parsed = json.loads(str(exc))
+    except json.JSONDecodeError:
+        return None
+    if isinstance(parsed, dict) and parsed.get("code") == "unsafe_for_humanoid_retarget":
+        return parsed
+    return None
 
-    return SimpleNamespace(
-        kind="provided",
-        payload=humanoid_source,
-        provenance={"source_kind": "provided", "method": "explicit-argument"},
-        warnings=[],
-    )
+
+def _fallback_warning_message(mode: MetadataMode, diagnostic: dict[str, Any] | None) -> str:
+    if diagnostic is None:
+        return f"No valid humanoid metadata source was available; wrote legacy-compatible sidecar in metadata_mode={mode}."
+    reason_codes = ", ".join(str(reason.get("code", "unknown")) for reason in diagnostic.get("reasons", []))
+    return f"Unsafe humanoid metadata was not published in metadata_mode={mode}; wrote legacy-compatible sidecar. Reasons: {reason_codes}."
 
 
 def _payload_hash_without_self_reference(payload: dict) -> str:

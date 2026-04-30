@@ -153,8 +153,7 @@ def resolve_humanoid(glb_json: dict[str, Any], *, min_role: float = 0.75, min_to
     _assign_arm_roles(graph, roles, confidence, warnings, "left", left_arm_root)
     _assign_arm_roles(graph, roles, confidence, warnings, "right", right_arm_root)
 
-    leg_roots = [child for child in graph.nodes[hips].children if child != trunk_path[1]]
-    left_leg_root, right_leg_root = _symmetric_pair(graph, leg_roots, label="legs")
+    left_leg_root, right_leg_root = _leg_roots_for_hips(graph, trunk_path)
     _assign_leg_roles(graph, roles, confidence, "left", left_leg_root)
     _assign_leg_roles(graph, roles, confidence, "right", right_leg_root)
 
@@ -283,6 +282,88 @@ def _assign_leg_roles(graph: JointGraph, roles: dict[str, str], confidence: dict
     confidence[f"{side}_upper_leg"] = 0.9
     confidence[f"{side}_lower_leg"] = 0.9
     confidence[f"{side}_foot"] = 0.9
+
+
+def _leg_roots_for_hips(graph: JointGraph, trunk_path: list[str]) -> list[str]:
+    scanned_candidates: list[str] = []
+    for index, parent in enumerate(trunk_path[:3]):
+        next_trunk = trunk_path[index + 1] if index + 1 < len(trunk_path) else None
+        candidates = [child for child in graph.nodes[parent].children if child != next_trunk]
+        scanned_candidates.extend(candidates)
+        leg_roots = _select_leg_roots_from_candidates(graph, candidates)
+        if leg_roots is not None:
+            return leg_roots
+    _fail(
+        "semantic_leg_symmetry_ambiguous",
+        "Unable to find one clear symmetric leg pair with sufficient chain length, downward evidence, and lateral separation.",
+        candidates=sorted(scanned_candidates),
+    )
+
+
+def _select_leg_roots_from_candidates(graph: JointGraph, candidates: list[str]) -> list[str] | None:
+    plausible = [child for child in candidates if _leg_branch_chain_length(graph, child) >= 3 and _leg_branch_downward_drop(graph, child) >= 0.75]
+    scored_pairs: list[tuple[tuple[float, float, float], tuple[str, str], int]] = []
+    for first, second in combinations(plausible, 2):
+        axis = _best_leg_lateral_axis(graph, [first, second])
+        if axis is None:
+            continue
+        separation = abs(_leg_lateral_center(graph, first, axis) - _leg_lateral_center(graph, second, axis))
+        downward = min(_leg_branch_downward_drop(graph, first), _leg_branch_downward_drop(graph, second))
+        chain_length = min(_leg_branch_chain_length(graph, first), _leg_branch_chain_length(graph, second))
+        balance_penalty = abs(_leg_branch_downward_drop(graph, first) - _leg_branch_downward_drop(graph, second))
+        scored_pairs.append(((chain_length, downward - balance_penalty, separation), (first, second), axis))
+    if not scored_pairs:
+        return None
+    scored_pairs.sort(key=lambda item: item[0], reverse=True)
+    if len(scored_pairs) > 1 and _leg_pair_scores_too_close(scored_pairs[0][0], scored_pairs[1][0]):
+        _fail(
+            "semantic_leg_symmetry_ambiguous",
+            "Unable to choose between multiple plausible leg pairs without a clear score margin.",
+            candidates=sorted(candidates),
+            plausible=sorted(plausible),
+            best_pair=sorted(scored_pairs[0][1]),
+            next_pair=sorted(scored_pairs[1][1]),
+            best_score=scored_pairs[0][0],
+            next_score=scored_pairs[1][0],
+        )
+    first, second = scored_pairs[0][1]
+    axis = scored_pairs[0][2]
+    return sorted([first, second], key=lambda node_id: (_leg_lateral_center(graph, node_id, axis), graph.nodes[node_id].index))
+
+
+def _leg_pair_scores_too_close(best: tuple[float, float, float], next_best: tuple[float, float, float]) -> bool:
+    return best[0] == next_best[0] and math.isclose(best[1], next_best[1], rel_tol=0.05, abs_tol=0.05) and math.isclose(best[2], next_best[2], rel_tol=0.08, abs_tol=0.03)
+
+
+def _leg_branch_chain_length(graph: JointGraph, root: str) -> int:
+    return len(_single_child_chain(graph, root, max_nodes=4))
+
+
+def _leg_branch_downward_drop(graph: JointGraph, root: str) -> float:
+    chain = _single_child_chain(graph, root, max_nodes=4)
+    return _y(graph, root) - min(_y(graph, node_id) for node_id in chain)
+
+
+def _best_leg_lateral_axis(graph: JointGraph, candidates: list[str]) -> int | None:
+    if len(candidates) != 2:
+        return None
+    scored_axes: list[tuple[float, int]] = []
+    for axis in (0, 2):
+        first, second = candidates
+        separation = abs(_leg_lateral_center(graph, first, axis) - _leg_lateral_center(graph, second, axis))
+        if separation >= 0.05:
+            scored_axes.append((separation, axis))
+    if not scored_axes:
+        return None
+    scored_axes.sort(reverse=True)
+    if len(scored_axes) > 1 and math.isclose(scored_axes[0][0], scored_axes[1][0], rel_tol=0.05, abs_tol=0.01):
+        return None
+    return scored_axes[0][1]
+
+
+def _leg_lateral_center(graph: JointGraph, root: str, axis: int) -> float:
+    chain = _single_child_chain(graph, root, max_nodes=4)
+    return sum(_axis_value(graph, node_id, axis) for node_id in chain) / len(chain)
 
 
 def _symmetric_pair(graph: JointGraph, candidates: list[str], *, label: str) -> tuple[str, str]:

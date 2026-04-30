@@ -345,6 +345,90 @@ class SemanticHumanoidResolverTests(unittest.TestCase):
         self.assertEqual(declared["roles"]["right_upper_leg"], "anon_right_upper_leg")
         self.assertEqual(declared["roles"]["right_foot"], "anon_right_foot")
 
+    def test_leg_selection_uses_descendant_downward_evidence_when_roots_are_near_center(self) -> None:
+        payload = minimal_semantic_payload(prefix="anon")
+        replacements = {
+            "anon_left_upper_leg": [-0.01, -0.45, 0.0],
+            "anon_left_lower_leg": [-0.22, -0.7, 0.0],
+            "anon_left_foot": [-0.08, -0.25, 0.22],
+            "anon_right_upper_leg": [0.01, -0.45, 0.0],
+            "anon_right_lower_leg": [0.22, -0.7, 0.0],
+            "anon_right_foot": [0.08, -0.25, 0.22],
+        }
+        for node in payload["nodes"]:
+            if node["name"] in replacements:
+                node["translation"] = replacements[node["name"]]
+        hips_index = next(index for index, node in enumerate(payload["nodes"]) if node["name"] == "anon_hips")
+        for name, translation in (
+            ("anon_helper_left", [-0.02, -0.08, 0.0]),
+            ("anon_helper_left_tip", [-0.02, -0.04, 0.0]),
+            ("anon_helper_right", [0.02, -0.08, 0.0]),
+            ("anon_helper_right_tip", [0.02, -0.04, 0.0]),
+            ("anon_center_tail", [0.0, -0.2, 0.0]),
+            ("anon_center_tail_tip", [0.0, -0.2, 0.0]),
+        ):
+            payload["nodes"].append({"name": name, "translation": translation})
+        index_by_name = {node["name"]: index for index, node in enumerate(payload["nodes"])}
+        payload["nodes"][hips_index].setdefault("children", []).extend(
+            [index_by_name["anon_helper_left"], index_by_name["anon_helper_right"], index_by_name["anon_center_tail"]]
+        )
+        payload["nodes"][index_by_name["anon_helper_left"]]["children"] = [index_by_name["anon_helper_left_tip"]]
+        payload["nodes"][index_by_name["anon_helper_right"]]["children"] = [index_by_name["anon_helper_right_tip"]]
+        payload["nodes"][index_by_name["anon_center_tail"]]["children"] = [index_by_name["anon_center_tail_tip"]]
+        payload["skins"][0]["joints"] = list(range(len(payload["nodes"])))
+
+        declared = resolve_humanoid(payload)
+
+        self.assertEqual(declared["roles"]["left_upper_leg"], "anon_left_upper_leg")
+        self.assertEqual(declared["roles"]["left_lower_leg"], "anon_left_lower_leg")
+        self.assertEqual(declared["roles"]["left_foot"], "anon_left_foot")
+        self.assertEqual(declared["roles"]["right_upper_leg"], "anon_right_upper_leg")
+        self.assertEqual(declared["roles"]["right_lower_leg"], "anon_right_lower_leg")
+        self.assertEqual(declared["roles"]["right_foot"], "anon_right_foot")
+
+    def test_leg_selection_scans_lower_trunk_when_hips_root_only_contains_pelvis_child(self) -> None:
+        payload = minimal_semantic_payload(prefix="anon")
+        index_by_name = {node["name"]: index for index, node in enumerate(payload["nodes"])}
+        hips = payload["nodes"][index_by_name["anon_hips"]]
+        spine = payload["nodes"][index_by_name["anon_spine"]]
+        hips["children"] = [index_by_name["anon_spine"]]
+        spine.setdefault("children", []).extend([index_by_name["anon_left_upper_leg"], index_by_name["anon_right_upper_leg"]])
+
+        declared = resolve_humanoid(payload)
+
+        self.assertEqual(declared["roles"]["hips"], "anon_hips")
+        self.assertEqual(declared["roles"]["left_upper_leg"], "anon_left_upper_leg")
+        self.assertEqual(declared["roles"]["left_foot"], "anon_left_foot")
+        self.assertEqual(declared["roles"]["right_upper_leg"], "anon_right_upper_leg")
+        self.assertEqual(declared["roles"]["right_foot"], "anon_right_foot")
+
+    def test_leg_selection_fails_closed_when_multiple_leg_pairs_have_no_clear_margin(self) -> None:
+        payload = minimal_semantic_payload(prefix="anon")
+        hips_index = next(index for index, node in enumerate(payload["nodes"]) if node["name"] == "anon_hips")
+        for name, translation in (
+            ("anon_left_spare_upper_leg", [-0.19, -0.8, 0.0]),
+            ("anon_left_spare_lower_leg", [0.0, -0.8, 0.0]),
+            ("anon_left_spare_foot", [0.0, -0.25, 0.35]),
+            ("anon_right_spare_upper_leg", [0.19, -0.8, 0.0]),
+            ("anon_right_spare_lower_leg", [0.0, -0.8, 0.0]),
+            ("anon_right_spare_foot", [0.0, -0.25, 0.35]),
+        ):
+            payload["nodes"].append({"name": name, "translation": translation})
+        index_by_name = {node["name"]: index for index, node in enumerate(payload["nodes"])}
+        payload["nodes"][hips_index].setdefault("children", []).extend(
+            [index_by_name["anon_left_spare_upper_leg"], index_by_name["anon_right_spare_upper_leg"]]
+        )
+        payload["nodes"][index_by_name["anon_left_spare_upper_leg"]]["children"] = [index_by_name["anon_left_spare_lower_leg"]]
+        payload["nodes"][index_by_name["anon_left_spare_lower_leg"]]["children"] = [index_by_name["anon_left_spare_foot"]]
+        payload["nodes"][index_by_name["anon_right_spare_upper_leg"]]["children"] = [index_by_name["anon_right_spare_lower_leg"]]
+        payload["nodes"][index_by_name["anon_right_spare_lower_leg"]]["children"] = [index_by_name["anon_right_spare_foot"]]
+        payload["skins"][0]["joints"] = list(range(len(payload["nodes"])))
+
+        with self.assertRaisesRegex(SemanticHumanoidResolutionError, "semantic_leg_symmetry_ambiguous") as raised:
+            resolve_humanoid(payload)
+
+        self.assertIn("multiple plausible leg pairs", raised.exception.diagnostics[0]["message"])
+
     def test_offset_humanoid_symmetry_uses_relative_center_not_global_x_origin(self) -> None:
         payload = shoulderless_semantic_payload(prefix="anon")
         payload["nodes"][0]["translation"] = [10.0, 1.0, 0.0]

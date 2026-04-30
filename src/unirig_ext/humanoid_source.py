@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .gltf_skin_analysis import GlbContainer, GltfSkinAnalysisError, read_glb_container
+from .humanoid_quality_gate import HumanoidQualityGateError, run_humanoid_quality_gate
 from .semantic_humanoid_resolver import SemanticHumanoidResolutionError, resolve_humanoid
 
 
@@ -22,22 +24,34 @@ class ResolvedHumanoidSource:
     warnings: list[dict[str, str]]
 
 
+UNVERIFIED_TRUSTED_SOURCE_WARNING = {
+    "code": "trusted_humanoid_source_unverified",
+    "message": "Explicit humanoid_source was trusted as caller-provided metadata, but no embedded skin-weight quality-gate evidence was available; do not treat this as independently certified safe humanoid retargeting.",
+    "severity": "warning",
+}
+
+
 def resolve_humanoid_source(output_path: Path) -> ResolvedHumanoidSource:
+    container = _try_read_glb_container(output_path)
     companion = output_path.with_name(f"{output_path.stem}.humanoid.json")
     if companion.exists():
         payload = _read_json_file(companion, source_kind="companion")
+        quality_gate = _quality_gate_diagnostic(container, payload)
+        provenance = {
+            "source_kind": "companion",
+            "path": str(companion),
+            "payload_sha256": _hash_payload(payload),
+        }
+        if quality_gate is not None:
+            provenance["quality_gate"] = quality_gate
         return ResolvedHumanoidSource(
             kind="companion",
             payload=payload,
-            provenance={
-                "source_kind": "companion",
-                "path": str(companion),
-                "payload_sha256": _hash_payload(payload),
-            },
+            provenance=provenance,
             warnings=[],
         )
 
-    glb_json = _read_glb_json(output_path)
+    glb_json = container.json if container is not None else _read_glb_json(output_path)
     extras = glb_json.get("extras") if isinstance(glb_json, dict) else None
     declared = extras.get("unirig_humanoid") if isinstance(extras, dict) else None
     if declared is not None:
@@ -46,15 +60,19 @@ def resolve_humanoid_source(output_path: Path) -> ResolvedHumanoidSource:
                 "GLB extras source extras.unirig_humanoid must be a JSON object. "
                 "Provide a valid companion .humanoid.json or repair the retained extras metadata."
             )
+        quality_gate = _quality_gate_diagnostic(container, declared)
+        provenance = {
+            "source_kind": "glb_extras",
+            "path": str(output_path),
+            "json_pointer": "/extras/unirig_humanoid",
+            "payload_sha256": _hash_payload(declared),
+        }
+        if quality_gate is not None:
+            provenance["quality_gate"] = quality_gate
         return ResolvedHumanoidSource(
             kind="glb_extras",
             payload=declared,
-            provenance={
-                "source_kind": "glb_extras",
-                "path": str(output_path),
-                "json_pointer": "/extras/unirig_humanoid",
-                "payload_sha256": _hash_payload(declared),
-            },
+            provenance=provenance,
             warnings=[],
         )
 
@@ -62,15 +80,19 @@ def resolve_humanoid_source(output_path: Path) -> ResolvedHumanoidSource:
         payload = resolve_humanoid(glb_json)
     except SemanticHumanoidResolutionError as exc:
         raise HumanoidResolutionFailure(str(exc)) from exc
+    quality_gate = _quality_gate_diagnostic(container, payload)
+    provenance = {
+        "source_kind": "semantic_resolver",
+        "path": str(output_path),
+        "method": payload.get("provenance", {}).get("method", ""),
+        "payload_sha256": _hash_payload(payload),
+    }
+    if quality_gate is not None:
+        provenance["quality_gate"] = quality_gate
     return ResolvedHumanoidSource(
         kind="semantic_resolver",
         payload=payload,
-        provenance={
-            "source_kind": "semantic_resolver",
-            "path": str(output_path),
-            "method": payload.get("provenance", {}).get("method", ""),
-            "payload_sha256": _hash_payload(payload),
-        },
+        provenance=provenance,
         warnings=[
             {
                 "code": "humanoid_source_from_semantic_resolver",
@@ -79,6 +101,77 @@ def resolve_humanoid_source(output_path: Path) -> ResolvedHumanoidSource:
             }
         ],
     )
+
+
+def resolve_explicit_humanoid_source(output_path: Path, humanoid_source: dict[str, Any]) -> ResolvedHumanoidSource:
+    container = _try_read_glb_container(output_path)
+    quality_gate = _quality_gate_diagnostic(container, humanoid_source)
+    provenance: dict[str, Any] = {
+        "source_kind": "provided",
+        "method": "explicit-argument",
+        "payload_sha256": _hash_payload(humanoid_source),
+    }
+    warnings: list[dict[str, str]] = []
+    if quality_gate is None:
+        provenance["quality_gate"] = {
+            "code": "humanoid_rig_quality_gate",
+            "status": "trusted_source_unverified",
+            "reason": "embedded_skin_weight_evidence_not_available",
+        }
+        provenance["safe_retargeting_evidence"] = "unverified"
+        warnings.append(dict(UNVERIFIED_TRUSTED_SOURCE_WARNING))
+    else:
+        provenance["quality_gate"] = quality_gate
+        provenance["safe_retargeting_evidence"] = "quality_gate_passed" if quality_gate.get("status") == "passed" else "unverified"
+    return ResolvedHumanoidSource(kind="provided", payload=humanoid_source, provenance=provenance, warnings=warnings)
+
+
+def _try_read_glb_container(output_path: Path) -> GlbContainer | None:
+    is_glb_container = _has_glb_magic(output_path)
+    try:
+        return read_glb_container(output_path)
+    except (GltfSkinAnalysisError, OSError, json.JSONDecodeError) as exc:
+        if is_glb_container:
+            raise HumanoidResolutionFailure(json.dumps(_unsupported_glb_diagnostic(output_path, exc), sort_keys=True)) from exc
+        return None
+
+
+def _quality_gate_diagnostic(container: GlbContainer | None, payload: dict[str, Any]) -> dict[str, Any] | None:
+    if container is None:
+        return None
+    try:
+        report = run_humanoid_quality_gate(container, payload)
+    except HumanoidQualityGateError as exc:
+        raise HumanoidResolutionFailure(json.dumps(exc.diagnostic, sort_keys=True)) from exc
+    if report.status == "not_applicable":
+        return None
+    return report.diagnostic
+
+
+def _has_glb_magic(output_path: Path) -> bool:
+    try:
+        with output_path.open("rb") as handle:
+            return handle.read(4) == b"glTF"
+    except OSError:
+        return False
+
+
+def _unsupported_glb_diagnostic(output_path: Path, exc: BaseException) -> dict[str, Any]:
+    return {
+        "code": "unsafe_for_humanoid_retarget",
+        "severity": "error",
+        "reasons": [
+            {
+                "code": "unsupported_glb_container",
+                "message": f"Embedded GLB could not be parsed for humanoid quality-gate evidence: {exc}",
+                "path": str(output_path),
+            }
+        ],
+        "joint_classes": {},
+        "weight_summary": {"vertex_count": 0},
+        "weighted_joints": {},
+        "remediation": "Export a valid embedded glTF 2.0 GLB with readable JSON/BIN chunks and skin-weight accessors, or avoid metadata_mode=humanoid.",
+    }
 
 
 def _read_json_file(path: Path, *, source_kind: str) -> dict[str, Any]:

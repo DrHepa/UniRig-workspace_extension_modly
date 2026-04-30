@@ -20,6 +20,7 @@ from test_metadata import complete_humanoid_source
 from fixtures.unirig_real_topology import real_unirig_40_payload, real_unirig_52_payload
 from unirig_ext.humanoid_contract import build_contract_from_declared_data
 from unirig_ext.humanoid_source import HumanoidResolutionFailure, resolve_humanoid_source
+from test_humanoid_quality_gate import _declared_roles, write_embedded_skin_glb
 
 
 def write_glb_json(target: Path, payload: dict) -> Path:
@@ -32,6 +33,14 @@ def write_glb_json(target: Path, payload: dict) -> Path:
     blob += struct.pack("<I", len(json_chunk))
     blob += b"JSON"
     blob += json_chunk
+    target.write_bytes(blob)
+    return target
+
+
+def write_malformed_glb_header(target: Path) -> Path:
+    blob = bytearray(b"glTF")
+    blob += struct.pack("<I", 1)
+    blob += struct.pack("<I", 12)
     target.write_bytes(blob)
     return target
 
@@ -97,6 +106,63 @@ class HumanoidSourceTests(unittest.TestCase):
             self.assertEqual(contract["required_roles"]["right_hand"], "bone_22")
             self.assertEqual(contract["optional_roles"]["right_shoulder"], "bone_19")
             self.assertEqual(resolved.warnings[0]["code"], "humanoid_source_from_semantic_resolver")
+
+    def test_clean_embedded_skin_records_quality_gate_provenance_before_contract(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="unirig-source-") as temp_dir:
+            output_path = write_embedded_skin_glb(Path(temp_dir) / "avatar_unirig.glb")
+            output_path.with_name("avatar_unirig.humanoid.json").write_text(json.dumps(_declared_roles()), encoding="utf-8")
+
+            resolved = resolve_humanoid_source(output_path)
+
+            self.assertEqual(resolved.kind, "companion")
+            self.assertEqual(resolved.provenance["quality_gate"]["status"], "passed")
+            self.assertEqual(resolved.provenance["quality_gate"]["joint_classes"]["left_hand"], "body")
+
+    def test_sleeved_embedded_skin_blocks_humanoid_source_before_contract(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="unirig-source-") as temp_dir:
+            output_path = write_embedded_skin_glb(Path(temp_dir) / "avatar_unirig.glb", sleeve=True, semantic_connected=True)
+            output_path.with_name("avatar_unirig.humanoid.json").write_text(json.dumps(_declared_roles()), encoding="utf-8")
+
+            with self.assertRaisesRegex(HumanoidResolutionFailure, "unsafe_for_humanoid_retarget.*sleeve_branch_under_arm"):
+                resolve_humanoid_source(output_path)
+
+    def test_unsafe_retained_extras_are_gated_before_contract_publication(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="unirig-source-") as temp_dir:
+            output_path = write_embedded_skin_glb(
+                Path(temp_dir) / "avatar_unirig.glb",
+                sleeve=True,
+                extras={"unirig_humanoid": _declared_roles()},
+            )
+
+            with self.assertRaisesRegex(HumanoidResolutionFailure, "unsafe_for_humanoid_retarget.*sleeve_branch_under_arm") as raised:
+                resolve_humanoid_source(output_path)
+
+            diagnostic = json.loads(str(raised.exception))
+            self.assertEqual(diagnostic["joint_classes"]["left_sleeve"], "clothing")
+            self.assertEqual(diagnostic["weight_summary"]["vertex_count"], 9)
+
+    def test_semantic_resolver_output_is_gated_with_embedded_skin_evidence(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="unirig-source-") as temp_dir:
+            output_path = write_embedded_skin_glb(Path(temp_dir) / "avatar_unirig.glb", sleeve=True, semantic_connected=True)
+
+            with self.assertRaisesRegex(HumanoidResolutionFailure, "unsafe_for_humanoid_retarget.*sleeve_branch_under_arm") as raised:
+                resolve_humanoid_source(output_path)
+
+            diagnostic = json.loads(str(raised.exception))
+            self.assertEqual(diagnostic["joint_classes"]["left_sleeve"], "clothing")
+            self.assertIn("weighted_joints", diagnostic)
+
+    def test_malformed_embedded_glb_with_companion_fails_closed_instead_of_bypassing_gate(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="unirig-source-") as temp_dir:
+            output_path = write_malformed_glb_header(Path(temp_dir) / "avatar_unirig.glb")
+            output_path.with_name("avatar_unirig.humanoid.json").write_text(json.dumps(_declared_roles()), encoding="utf-8")
+
+            with self.assertRaisesRegex(HumanoidResolutionFailure, "unsafe_for_humanoid_retarget.*unsupported_glb_container") as raised:
+                resolve_humanoid_source(output_path)
+
+            message = str(raised.exception)
+            self.assertIn("joint_classes", message)
+            self.assertIn("weight_summary", message)
 
 
 if __name__ == "__main__":

@@ -18,6 +18,7 @@ if str(TESTS) not in sys.path:
 
 from test_metadata import MetadataTests, complete_humanoid_source
 from test_humanoid_source import write_glb_json
+from test_humanoid_quality_gate import _declared_roles, write_embedded_skin_glb
 from fixtures.unirig_real_topology import real_unirig_52_payload
 from unirig_ext.metadata import build_sidecar
 
@@ -79,6 +80,52 @@ class MetadataSidecarModeTests(unittest.TestCase):
         self.assertEqual(payload["humanoid_source_kind"], "semantic_resolver")
         self.assertEqual(payload["humanoid_contract"]["required_roles"]["hips"], "bone_0")
         self.assertEqual(payload["humanoid_contract"]["nodes"]["bone_1"]["transforms"]["rest_world"][1][3], 1.7)
+
+    def test_humanoid_mode_fails_closed_when_quality_gate_reports_sleeve_branch(self) -> None:
+        write_embedded_skin_glb(self.output_mesh, sleeve=True)
+        self.output_mesh.with_name("avatar_unirig.humanoid.json").write_text(json.dumps(_declared_roles()), encoding="utf-8")
+
+        with self.assertRaisesRegex(Exception, "unsafe_for_humanoid_retarget.*sleeve_branch_under_arm"):
+            build_sidecar(self.output_mesh, self.input_mesh, 12345, self.context, metadata_mode="humanoid")
+
+    def test_explicit_humanoid_source_is_still_gated_when_output_contains_skin_evidence(self) -> None:
+        write_embedded_skin_glb(self.output_mesh, sleeve=True)
+
+        with self.assertRaisesRegex(Exception, "unsafe_for_humanoid_retarget.*sleeve_branch_under_arm"):
+            build_sidecar(
+                self.output_mesh,
+                self.input_mesh,
+                12345,
+                self.context,
+                humanoid_source=_declared_roles(),
+                metadata_mode="humanoid",
+            )
+
+    def test_explicit_humanoid_source_without_gate_evidence_is_marked_trusted_unverified(self) -> None:
+        payload = build_sidecar(
+            self.output_mesh,
+            self.input_mesh,
+            12345,
+            self.context,
+            humanoid_source=complete_humanoid_source(include_fingers=False),
+            metadata_mode="humanoid",
+        )
+
+        self.assertEqual(payload["humanoid_source_kind"], "provided")
+        self.assertEqual(payload["humanoid_provenance"]["quality_gate"]["status"], "trusted_source_unverified")
+        self.assertEqual(payload["humanoid_provenance"]["safe_retargeting_evidence"], "unverified")
+        self.assertIn("trusted_humanoid_source_unverified", {warning["code"] for warning in payload["humanoid_warnings"]})
+
+    def test_auto_mode_avoids_unsafe_contract_and_surfaces_quality_gate_diagnostics(self) -> None:
+        write_embedded_skin_glb(self.output_mesh, sleeve=True)
+        self.output_mesh.with_name("avatar_unirig.humanoid.json").write_text(json.dumps(_declared_roles()), encoding="utf-8")
+
+        payload = build_sidecar(self.output_mesh, self.input_mesh, 12345, self.context, metadata_mode="auto")
+
+        self.assertNotIn("humanoid_contract", payload)
+        self.assertEqual(payload["humanoid_source_kind"], "fallback")
+        self.assertEqual(payload["humanoid_provenance"]["diagnostic"]["code"], "unsafe_for_humanoid_retarget")
+        self.assertIn("sleeve_branch_under_arm", {reason["code"] for reason in payload["humanoid_provenance"]["diagnostic"]["reasons"]})
 
 
 if __name__ == "__main__":
