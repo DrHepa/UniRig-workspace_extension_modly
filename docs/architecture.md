@@ -92,8 +92,28 @@ Humanoid contract rules:
 - Required core full-body roles and chains must be explicit and validated before claiming humanoid metadata. Toes are optional: declared toe nodes extend the corresponding leg chains, while missing toes keep leg chains valid through the foot nodes. Optional fingers degrade through deterministic warnings when they are absent or partially declared.
 - GLB extras mirroring is deferred so published GLB bytes and hashes remain explicit and the sidecar stays the source of truth.
 - `metadata_mode` is the public output contract switch. `auto` attempts bounded resolution and writes a legacy-compatible fallback warning when no valid source exists; `legacy` omits all humanoid fields; `humanoid` must fail closed before `done` unless a valid contract can be built.
-- Humanoid resolution priority is deterministic: companion `<output-stem>.humanoid.json`, then read-only GLB extras (`extras.unirig_humanoid`), then an exact known UniRig topology profile. The topology profile path is deliberately bounded; unknown or ambiguous output topology is rejected instead of inferred.
+- Humanoid resolution priority is deterministic: companion `<output-stem>.humanoid.json`, then read-only GLB extras (`extras.unirig_humanoid`), then semantic resolver evidence from the published output GLB when the output skin/rest/weight evidence is strong enough. Any topology profile compatibility remains narrow and evidence-backed; unknown, ambiguous, contaminated, or contract-insufficient output topology is rejected instead of inferred.
 - The mode switch never mutates GLB bytes: no GLB mutation is part of the contract, and the adjacent sidecar remains authoritative.
+
+## Humanoid corpus profiling boundary
+
+`humanoid-corpus-profiling` is a read-only diagnostic layer around the existing parser, semantic resolver, humanoid contract builder, semantic body graph, and quality gate. It exists to make batches of rigged GLBs reproducible as corpus evidence before changing resolver or publication behavior.
+
+The profiler is exposed as:
+
+```bash
+python3 -m unirig_ext.humanoid_corpus_cli <directory|glob|file...> --json-out /tmp/report.json [--markdown-out /tmp/report.md] [--hash]
+```
+
+Architectural boundaries:
+
+- It does not add a `manifest.json` node and does not change `processor.py`.
+- It does not write `.rigmeta.json`, mutate GLB bytes, emit Modly `done`, or participate in runtime publication.
+- Its JSON report is authoritative for diagnostics; Markdown is generated only from that JSON.
+- It assigns one primary evidence/failure family per asset and preserves overlapping evidence as secondary reason codes.
+- It can guide future resolver, quality-gate, verified-transfer, or upstream-rigging work, but the report itself is never humanoid publication evidence.
+
+This boundary is deliberate. Corpus reports help prevent GLB-by-GLB patching, but they are not a loophole around strict humanoid metadata validation.
 
 ## Repository layout
 
@@ -105,6 +125,8 @@ Humanoid contract rules:
 - `src/unirig_ext/io.py` — input validation, staging, and output publication
 - `src/unirig_ext/metadata.py` — sidecar writer with stable runtime facts and optional humanoid contract enrichment
 - `src/unirig_ext/humanoid_contract.py` — deterministic `modly.humanoid.v1` payload builder and validator
+- `src/unirig_ext/humanoid_corpus_profiler.py` — read-only corpus profiler and deterministic JSON/Markdown report model
+- `src/unirig_ext/humanoid_corpus_cli.py` — diagnostic CLI entrypoint for corpus profiling outside runtime publication
 - `tests/` — contract, bootstrap, pipeline, and docs posture checks
 
 ## Support posture

@@ -43,7 +43,29 @@ The public node parameter `metadata_mode` controls humanoid sidecar emission wit
 - `legacy` suppresses humanoid output completely. Even if a companion file or GLB extras exist, the `.rigmeta.json` sidecar omits `humanoid_contract`, humanoid provenance, and humanoid warnings.
 - `humanoid` is fail closed. A valid humanoid source is required; if resolution or validation fails, processing emits `error` before `done` and explains how to provide metadata.
 
-Resolution priority is bounded and deterministic: adjacent companion `<output-stem>.humanoid.json` first, read-only GLB extras (`extras.unirig_humanoid`) second, and an exact known UniRig topology profile third. The topology profile path is intentionally narrow; unknown or ambiguous topology is rejected instead of guessed.
+Resolution priority is bounded and deterministic: adjacent companion `<output-stem>.humanoid.json` first, read-only GLB extras (`extras.unirig_humanoid`) second, and semantic resolver evidence from the published output GLB when the output skin/rest/weight evidence is strong enough. Any topology profile compatibility remains narrow and evidence-backed; unknown, ambiguous, or asset-specific topology is rejected instead of guessed. Strict humanoid publication remains fail-closed: resolver success alone is not enough; quality-gate checks can still reject unsafe high-region weights, passive/accessory contamination, non-local spread, ambiguity, or contract-insufficient output skeletons.
+
+## Humanoid corpus profiling
+
+UniRig also exposes a diagnostic-only corpus profiler for analyzing batches of rigged GLBs by stable evidence/failure families instead of patching individual assets one by one.
+
+```bash
+python3 -m unirig_ext.humanoid_corpus_cli \
+  "/path/to/exports/*.glb" \
+  --json-out /tmp/unirig-corpus-profile.json \
+  --markdown-out /tmp/unirig-corpus-profile.md \
+  --hash
+```
+
+The profiler is intentionally **read-only**:
+
+- it does not call `processor.py`;
+- it does not mutate GLB files;
+- it does not write `.rigmeta.json` sidecars;
+- it does not relax `metadata_mode=humanoid`;
+- its reports are diagnostic evidence only and MUST NOT be used as humanoid publication evidence.
+
+Generated reports should stay outside the repository by default, for example under `/tmp`. Large corpora can be slow because the profiler reuses the same parser, semantic resolver, contract, and quality-gate code paths that make runtime publication conservative.
 
 ## Install and repair
 
@@ -119,6 +141,8 @@ Implemented here:
 - pinned upstream runtime staging and reuse
 - readiness verification with actionable failures
 - deterministic output naming and `.rigmeta.json` sidecar
+- sidecar-first humanoid metadata modes with fail-closed strict validation
+- diagnostic-only humanoid corpus profiling for family-level evidence reports
 - automated unit coverage for processor protocol, bootstrap/setup, and docs posture
 
 Not claimed here:
