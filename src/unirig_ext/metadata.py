@@ -8,7 +8,7 @@ from typing import Any
 from .bootstrap import RuntimeContext
 from .io import sha256_file
 from .humanoid_contract import HumanoidContractError, build_contract_from_declared_data
-from .humanoid_source import HumanoidResolutionFailure, resolve_explicit_humanoid_source, resolve_humanoid_source
+from .humanoid_source import HumanoidResolutionFailure, probe_humanoid_evidence, resolve_explicit_humanoid_source, resolve_humanoid_source
 from .metadata_mode import MetadataMode, normalize_metadata_mode
 
 
@@ -51,6 +51,7 @@ def build_sidecar(
             payload,
             mode=mode,
             output_path=output_path,
+            input_path=input_path,
             source_sha256=source_sha256,
             output_sha256=output_sha256,
             humanoid_source=humanoid_source,
@@ -95,6 +96,7 @@ def _apply_humanoid_metadata(
     *,
     mode: MetadataMode,
     output_path: Path,
+    input_path: Path,
     source_sha256: str,
     output_sha256: str,
     humanoid_source: dict[str, Any] | None,
@@ -112,6 +114,15 @@ def _apply_humanoid_metadata(
         )
     except (HumanoidResolutionFailure, HumanoidContractError, ValueError) as exc:
         if mode == "humanoid":
+            diagnostic = _output_contract_diagnostic_if_available(
+                mode=mode,
+                output_path=output_path,
+                input_path=input_path,
+                exc=exc,
+                humanoid_source=humanoid_source,
+            )
+            if diagnostic is not None:
+                raise HumanoidResolutionFailure(json.dumps(diagnostic, sort_keys=True), diagnostics=[diagnostic]) from exc
             raise HumanoidResolutionFailure(
                 "metadata_mode=humanoid requires a valid humanoid contract source before publishing done. "
                 f"Resolution/validation failed: {exc}. Remediation: provide a valid adjacent "
@@ -152,6 +163,58 @@ def _extract_unsafe_diagnostic(exc: BaseException) -> dict[str, Any] | None:
         return None
     if isinstance(parsed, dict) and parsed.get("code") == "unsafe_for_humanoid_retarget":
         return parsed
+    return None
+
+
+def _output_contract_diagnostic_if_available(
+    *,
+    mode: MetadataMode,
+    output_path: Path,
+    input_path: Path,
+    exc: BaseException,
+    humanoid_source: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if humanoid_source is not None:
+        return None
+    output_diagnostic = _first_diagnostic_with_code(exc, "semantic_spine_missing")
+    if output_diagnostic is None:
+        return None
+
+    source_probe = probe_humanoid_evidence(input_path)
+    if source_probe.status != "resolved":
+        return None
+
+    output = {
+        "path": str(output_path),
+        "source_kind": "semantic_resolver",
+        "failure_code": "semantic_spine_missing",
+    }
+    for key in ("joint_count", "root_count", "highest_path_length", "minimum_trunk_length", "highest_path", "roots"):
+        if key in output_diagnostic:
+            output[key] = output_diagnostic[key]
+
+    return {
+        "code": "humanoid_output_contract_insufficient",
+        "mode": mode,
+        "message": "source evidence resolved, but output contract evidence is insufficient for strict humanoid publication.",
+        "output": output,
+        "source": {
+            "path": source_probe.path,
+            "status": source_probe.status,
+            "source_kind": source_probe.kind,
+        },
+        "transfer": {"status": "absent", "required": True},
+        "remediation": "Provide contract-ready output humanoid evidence or a verified source-to-output transfer contract.",
+    }
+
+
+def _first_diagnostic_with_code(exc: BaseException, code: str) -> dict[str, Any] | None:
+    diagnostics = getattr(exc, "diagnostics", [])
+    if not isinstance(diagnostics, list):
+        return None
+    for diagnostic in diagnostics:
+        if isinstance(diagnostic, dict) and diagnostic.get("code") == code:
+            return diagnostic
     return None
 
 

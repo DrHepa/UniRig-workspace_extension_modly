@@ -42,6 +42,8 @@ REQUIRED_ROLES = (
     "right_foot",
 )
 
+MINIMUM_TRUNK_LENGTH = 5
+
 
 class SemanticHumanoidResolutionError(ValueError):
     def __init__(self, message: str, diagnostics: list[dict[str, Any]] | None = None) -> None:
@@ -68,6 +70,20 @@ class JointGraph:
     leaves: list[str]
     joints: list[str]
     has_inverse_bind: bool
+
+
+@dataclass(frozen=True)
+class ChestCandidateScore:
+    index: int
+    pair: tuple[str, str]
+    axis: int
+    min_chain_length: int
+    center_separation: float
+    center_balance: float
+    straddle_margin: float
+    downward_score: float
+    trunk_position_score: float
+    total: float
 
 
 def extract_joint_graph(glb_json: dict[str, Any]) -> JointGraph:
@@ -147,8 +163,17 @@ def resolve_humanoid(
     confidence["hips"] = 0.95
 
     trunk_path = _highest_path_from(graph, hips)
-    if len(trunk_path) < 5:
-        _fail("semantic_spine_missing", "Unable to find a long enough hips-to-head trunk chain.")
+    if len(trunk_path) < MINIMUM_TRUNK_LENGTH:
+        _fail(
+            "semantic_spine_missing",
+            "Unable to find a long enough hips-to-head trunk chain.",
+            joint_count=len(graph.joints),
+            root_count=len(graph.roots),
+            roots=list(graph.roots),
+            highest_path=list(trunk_path),
+            highest_path_length=len(trunk_path),
+            minimum_trunk_length=MINIMUM_TRUNK_LENGTH,
+        )
     chest_index = _find_chest_index(graph, trunk_path)
     if chest_index is None or chest_index < 2 or chest_index + 2 >= len(trunk_path):
         _fail("semantic_chest_missing", "Unable to identify a chest branch with symmetric arm evidence.")
@@ -266,49 +291,153 @@ def _resolve_single_root(graph: JointGraph) -> str:
 
 
 def _find_chest_index(graph: JointGraph, trunk_path: list[str]) -> int | None:
-    candidates: list[tuple[tuple[int, float], int]] = []
-    fallback_indices: list[int] = []
+    candidates: list[ChestCandidateScore] = []
     for index in range(2, len(trunk_path) - 2):
-        arm_roots = _arm_roots_for_chest_candidate(graph, trunk_path, index)
-        if len(arm_roots) != 2:
-            continue
-        axis = _best_lateral_axis(graph, arm_roots)
-        chain_lengths = [_arm_branch_chain_length(graph, root) for root in arm_roots]
-        if axis is None:
-            fallback_indices.append(index)
-            continue
-        if min(chain_lengths) < 3:
-            fallback_indices.append(index)
-            continue
-        separation = abs(_axis_value(graph, arm_roots[0], axis) - _axis_value(graph, arm_roots[1], axis))
-        candidates.append(((min(chain_lengths), separation), index))
+        score = _best_chest_score_for_candidate(graph, trunk_path, index)
+        if score is not None:
+            candidates.append(score)
     if not candidates:
-        if len(fallback_indices) == 1:
-            return fallback_indices[0]
         return None
-    candidates.sort(key=lambda item: item[0], reverse=True)
-    if len(candidates) > 1 and candidates[0][0][0] == candidates[1][0][0] and math.isclose(candidates[0][0][1], candidates[1][0][1], rel_tol=0.05, abs_tol=0.01):
+    candidates.sort(key=_chest_score_sort_key, reverse=True)
+    if len(candidates) > 1 and _chest_scores_too_close(candidates[0], candidates[1]):
         return None
-    return candidates[0][1]
+    return candidates[0].index
 
 
 def _arm_roots_for_chest_candidate(graph: JointGraph, trunk_path: list[str], index: int) -> list[str]:
+    score = _best_chest_score_for_candidate(graph, trunk_path, index)
+    if score is None:
+        return []
+    return list(score.pair)
+
+
+def _best_chest_score_for_candidate(graph: JointGraph, trunk_path: list[str], index: int) -> ChestCandidateScore | None:
     next_trunk = trunk_path[index + 1]
     side_children = [child for child in graph.nodes[trunk_path[index]].children if child != next_trunk]
     plausible = [child for child in side_children if _arm_branch_chain_length(graph, child) >= 2]
-    symmetric_pairs: list[tuple[float, tuple[str, str]]] = []
+    scored_pairs: list[ChestCandidateScore] = []
     for first, second in combinations(plausible, 2):
-        if max(_arm_branch_chain_length(graph, first), _arm_branch_chain_length(graph, second)) < 3:
+        score = _score_arm_pair_for_chest(graph, trunk_path, index, first, second)
+        if score is not None:
+            scored_pairs.append(score)
+    if not scored_pairs:
+        return None
+    scored_pairs.sort(key=_chest_score_sort_key, reverse=True)
+    if len(scored_pairs) > 1 and _chest_scores_too_close(scored_pairs[0], scored_pairs[1]):
+        return None
+    return scored_pairs[0]
+
+
+def _score_arm_pair_for_chest(graph: JointGraph, trunk_path: list[str], index: int, first: str, second: str) -> ChestCandidateScore | None:
+    first_length = _arm_branch_chain_length(graph, first)
+    second_length = _arm_branch_chain_length(graph, second)
+    min_chain_length = min(first_length, second_length)
+    if max(first_length, second_length) < 3:
+        return None
+    axis = _best_chest_lateral_axis(graph, trunk_path[index], first, second)
+    if axis is None:
+        return None
+
+    candidate_center = _axis_value(graph, trunk_path[index], axis)
+    first_offset = _arm_branch_center(graph, first, axis) - candidate_center
+    second_offset = _arm_branch_center(graph, second, axis) - candidate_center
+    if first_offset == 0.0 or second_offset == 0.0 or first_offset * second_offset >= 0.0:
+        return None
+
+    first_magnitude = abs(first_offset)
+    second_magnitude = abs(second_offset)
+    straddle_margin = min(first_magnitude, second_magnitude)
+    if straddle_margin < 0.08:
+        return None
+    average_magnitude = (first_magnitude + second_magnitude) / 2.0
+    if average_magnitude <= 0.0:
+        return None
+    balance_delta = abs(first_magnitude - second_magnitude) / average_magnitude
+    if balance_delta > 0.65:
+        return None
+
+    downward = min(_arm_branch_downward_drop(graph, first), _arm_branch_downward_drop(graph, second))
+    if downward < 0.04:
+        return None
+
+    center_separation = first_magnitude + second_magnitude
+    center_balance = max(0.0, 1.0 - balance_delta)
+    downward_score = min(downward / 0.30, 1.0)
+    trunk_position_score = _chest_trunk_position_score(trunk_path, index)
+    total = (
+        min_chain_length * 0.60
+        + center_separation * 0.80
+        + center_balance * 1.40
+        + straddle_margin * 0.70
+        + downward_score * 1.50
+        + trunk_position_score * 0.80
+    )
+    pair = tuple(sorted((first, second), key=lambda node_id: (_arm_branch_center(graph, node_id, axis), graph.nodes[node_id].index)))
+    return ChestCandidateScore(
+        index=index,
+        pair=pair,
+        axis=axis,
+        min_chain_length=min_chain_length,
+        center_separation=center_separation,
+        center_balance=center_balance,
+        straddle_margin=straddle_margin,
+        downward_score=downward_score,
+        trunk_position_score=trunk_position_score,
+        total=total,
+    )
+
+
+def _chest_score_sort_key(score: ChestCandidateScore) -> tuple[float, int, float, float, float, float, int]:
+    return (
+        score.total,
+        score.min_chain_length,
+        score.center_balance,
+        score.downward_score,
+        score.straddle_margin,
+        score.trunk_position_score,
+        -score.index,
+    )
+
+
+def _chest_scores_too_close(best: ChestCandidateScore, next_best: ChestCandidateScore) -> bool:
+    if best.min_chain_length != next_best.min_chain_length:
+        return False
+    return math.isclose(best.total, next_best.total, rel_tol=0.04, abs_tol=0.20)
+
+
+def _best_chest_lateral_axis(graph: JointGraph, chest: str, first: str, second: str) -> int | None:
+    scored_axes: list[tuple[float, int]] = []
+    for axis in (0, 2):
+        center = _axis_value(graph, chest, axis)
+        first_offset = _arm_branch_center(graph, first, axis) - center
+        second_offset = _arm_branch_center(graph, second, axis) - center
+        if first_offset * second_offset >= 0.0:
             continue
-        axis = _best_lateral_axis(graph, [first, second])
-        if axis is None:
-            symmetric_pairs.append((0.0, (first, second)))
-            continue
-        separation = abs(_axis_value(graph, first, axis) - _axis_value(graph, second, axis))
-        symmetric_pairs.append((separation, (first, second)))
-    if len(symmetric_pairs) != 1:
-        return []
-    return list(symmetric_pairs[0][1])
+        separation = abs(first_offset) + abs(second_offset)
+        if separation >= 0.16:
+            scored_axes.append((separation, axis))
+    if not scored_axes:
+        return None
+    scored_axes.sort(reverse=True)
+    if len(scored_axes) > 1 and math.isclose(scored_axes[0][0], scored_axes[1][0], rel_tol=0.05, abs_tol=0.01):
+        return None
+    return scored_axes[0][1]
+
+
+def _arm_branch_center(graph: JointGraph, root: str, axis: int) -> float:
+    chain = _single_child_chain(graph, root, max_nodes=4)
+    return sum(_axis_value(graph, node_id, axis) for node_id in chain) / len(chain)
+
+
+def _arm_branch_downward_drop(graph: JointGraph, root: str) -> float:
+    chain = _single_child_chain(graph, root, max_nodes=4)
+    return _y(graph, root) - min(_y(graph, node_id) for node_id in chain)
+
+
+def _chest_trunk_position_score(trunk_path: list[str], index: int) -> float:
+    available = max(1, len(trunk_path) - 4)
+    nodes_above = max(0, len(trunk_path) - index - 2)
+    return min(1.0, nodes_above / available)
 
 
 def _arm_branch_chain_length(graph: JointGraph, root: str) -> int:

@@ -88,6 +88,45 @@ class MetadataSidecarModeTests(unittest.TestCase):
         with self.assertRaisesRegex(Exception, "unsafe_for_humanoid_retarget.*sleeve_branch_under_arm"):
             build_sidecar(self.output_mesh, self.input_mesh, 12345, self.context, metadata_mode="humanoid")
 
+    def test_basic_humanoid_mode_accepts_shoulders_without_auto_or_legacy_fallback(self) -> None:
+        write_embedded_skin_glb(self.output_mesh, shoulder_connectors=True, hair_contamination=True)
+        self.output_mesh.with_name("avatar_unirig.humanoid.json").write_text(json.dumps(complete_humanoid_source(include_shoulders=True, include_fingers=False)), encoding="utf-8")
+
+        humanoid = build_sidecar(self.output_mesh, self.input_mesh, 12345, self.context, metadata_mode="humanoid")
+        auto = build_sidecar(self.output_mesh, self.input_mesh, 12345, self.context, metadata_mode="auto")
+        legacy = build_sidecar(self.output_mesh, self.input_mesh, 12345, self.context, metadata_mode="legacy")
+
+        self.assertEqual(humanoid["metadata_mode"], "humanoid")
+        self.assertEqual(humanoid["humanoid_source_kind"], "companion")
+        self.assertEqual(humanoid["humanoid_contract"]["schema"], "modly.humanoid.v1")
+        self.assertEqual(humanoid["humanoid_contract"]["optional_roles"]["left_shoulder"], "left_shoulder")
+        self.assertEqual(humanoid["humanoid_provenance"]["quality_gate"]["semantic_body_graph"]["warnings"][0]["code"], "high_region_weighted_by_torso_or_arm")
+        self.assertEqual(auto["metadata_mode"], "auto")
+        self.assertEqual(auto["humanoid_source_kind"], "companion")
+        self.assertNotIn("metadata_mode", legacy)
+        self.assertNotIn("humanoid_contract", legacy)
+
+    def test_upper_arm_high_region_tolerance_keeps_metadata_modes_explicit(self) -> None:
+        write_embedded_skin_glb(
+            self.output_mesh,
+            hair_contamination=True,
+            high_region_role="right_upper_arm",
+            high_region_y=1.584,
+        )
+        self.output_mesh.with_name("avatar_unirig.humanoid.json").write_text(json.dumps(complete_humanoid_source(include_fingers=False)), encoding="utf-8")
+
+        humanoid = build_sidecar(self.output_mesh, self.input_mesh, 12345, self.context, metadata_mode="humanoid")
+        auto = build_sidecar(self.output_mesh, self.input_mesh, 12345, self.context, metadata_mode="auto")
+        legacy = build_sidecar(self.output_mesh, self.input_mesh, 12345, self.context, metadata_mode="legacy")
+
+        self.assertEqual(humanoid["metadata_mode"], "humanoid")
+        self.assertEqual(humanoid["humanoid_source_kind"], "companion")
+        self.assertEqual(humanoid["humanoid_provenance"]["quality_gate"]["semantic_body_graph"]["warnings"][0]["severity"], "warning")
+        self.assertEqual(auto["metadata_mode"], "auto")
+        self.assertEqual(auto["humanoid_source_kind"], "companion")
+        self.assertNotIn("metadata_mode", legacy)
+        self.assertNotIn("humanoid_contract", legacy)
+
     def test_explicit_humanoid_source_is_still_gated_when_output_contains_skin_evidence(self) -> None:
         write_embedded_skin_glb(self.output_mesh, sleeve=True)
 

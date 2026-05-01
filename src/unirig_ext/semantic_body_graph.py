@@ -27,6 +27,18 @@ REQUIRED_CORE_ROLES = (
     "right_foot",
 )
 
+OPTIONAL_SHOULDER_CONNECTOR_ROLES = {
+    "left_shoulder": "left",
+    "right_shoulder": "right",
+    "left_clavicle": "left",
+    "right_clavicle": "right",
+}
+
+HIGH_REGION_THRESHOLD_NORMALIZED = 0.80
+UPPER_ARM_HIGH_REGION_WARNING_CUTOFF_NORMALIZED = 0.85
+UPPER_ARM_HIGH_REGION_WARNING_ROLES = {"chest", "left_upper_arm", "right_upper_arm"}
+UPPER_ARM_ROLES = {"left_upper_arm", "right_upper_arm"}
+
 
 @dataclass(frozen=True)
 class SemanticBodyNode:
@@ -88,19 +100,26 @@ def build_semantic_body_report(container: GlbContainer, declared: dict[str, Any]
     }
     passive_nodes = sorted(node_id for node_id, node in nodes.items() if "passive" in node.classes)
     passive_reasons = _passive_reasons(graph, passive_roots, nodes)
-    core_confidence = _core_confidence(nodes, core_roles, high_region, unknown_required)
+    blocking_high_region, high_region_warnings = _split_high_region_reasons(
+        high_region,
+        core_roles=core_roles,
+        unknown_required=unknown_required,
+        passive_nodes=passive_nodes,
+    )
+    core_confidence = _core_confidence(nodes, core_roles, blocking_high_region, unknown_required)
     predicates: dict[str, bool | float] = {
         "has_clear_spine": all(role in core_roles for role in ("hips", "spine", "chest", "neck", "head")),
         "has_left_right_arm_pair": all(role in core_roles for role in ("left_upper_arm", "left_lower_arm", "left_hand", "right_upper_arm", "right_lower_arm", "right_hand")),
         "has_leg_pair": all(role in core_roles for role in ("left_upper_leg", "left_lower_leg", "left_foot", "right_upper_leg", "right_lower_leg", "right_foot")),
         "has_passive_noncontract_subtrees": bool(passive_nodes),
-        "has_high_region_contamination": bool(high_region),
+        "has_high_region_contamination": bool(blocking_high_region),
+        "has_high_region_warning": bool(high_region_warnings),
         "unknown_near_required_roles": bool(unknown_required),
         "contract_core_confidence": core_confidence,
     }
     reasons: list[dict[str, Any]] = []
     reasons.extend(passive_reasons)
-    reasons.extend(high_region)
+    reasons.extend(blocking_high_region)
     if unknown_required:
         reasons.append(
             {
@@ -137,6 +156,7 @@ def build_semantic_body_report(container: GlbContainer, declared: dict[str, Any]
         "weighted_joints": {joint: summaries[joint].as_diagnostic() for joint in sorted(summaries)},
         "weight_summary": weight_summary,
         "reasons": reasons,
+        "warnings": high_region_warnings,
     }
     return SemanticBodyReport(
         nodes=nodes,
@@ -169,11 +189,12 @@ def _semantic_node(
         confidence = 0.82
         is_candidate = False
     elif role:
+        is_optional_connector = _is_safe_optional_connector(role, node_id, graph, roles)
         classes.extend(_classes_for_role(role))
         capabilities.append("humanoid_contract")
-        reasons.append("declared_role_matches_anatomical_core")
+        reasons.append("optional_connector_matches_anatomical_path" if is_optional_connector else "declared_role_matches_anatomical_core")
         confidence = 0.94
-        is_candidate = role in REQUIRED_CORE_ROLES
+        is_candidate = role in REQUIRED_CORE_ROLES or is_optional_connector
     else:
         classes.append("unknown")
         reasons.append("not_selected_as_required_core_role")
@@ -210,7 +231,21 @@ def _classes_for_role(role: str) -> list[str]:
         return ["leg", "limb"]
     if "arm" in role or "shoulder" in role:
         return ["limb"]
+    if "clavicle" in role:
+        return ["limb"]
     return ["unknown"]
+
+
+def _is_safe_optional_connector(role: str, joint: str, graph: JointGraph, roles: dict[str, Any]) -> bool:
+    side = OPTIONAL_SHOULDER_CONNECTOR_ROLES.get(role)
+    if side is None or joint not in graph.nodes:
+        return False
+    upper_arm = str(roles.get(f"{side}_upper_arm", ""))
+    if not upper_arm or upper_arm not in graph.nodes:
+        return False
+    parent = graph.nodes[joint].parent
+    expected_parents = {str(roles.get("chest", "")), str(roles.get("spine", ""))} - {""}
+    return parent in expected_parents and graph.nodes[upper_arm].parent == joint
 
 
 def _role_is_candidate(role: str, roles: dict[str, Any], graph: JointGraph, passive_roots: set[str]) -> bool:
@@ -283,17 +318,65 @@ def _passive_reasons(graph: JointGraph, passive_roots: set[str], nodes: dict[str
 
 
 def _high_region_reasons(roles: dict[str, Any], summaries: dict[str, JointWeightSummary], weight_summary: dict[str, Any]) -> list[dict[str, Any]]:
-    high_threshold = float(weight_summary.get("height_min", 0.0)) + float(weight_summary.get("height", 0.0)) * 0.80
+    height_min = float(weight_summary.get("height_min", 0.0))
+    height = max(float(weight_summary.get("height", 0.0)), 0.000001)
+    high_threshold = height_min + height * HIGH_REGION_THRESHOLD_NORMALIZED
     suspect_roles = [role for role in roles if role in {"hips", "spine", "chest"} or "arm" in role or "hand" in role]
     high_joints = []
     for role in suspect_roles:
         joint = str(roles[role])
         summary = summaries.get(joint)
         if summary and summary.count and summary.max_y >= high_threshold:
-            high_joints.append({"role": role, "joint": joint, "max_y": round(summary.max_y, 6)})
+            normalized_max_y = (float(summary.max_y) - height_min) / height
+            high_joints.append(
+                {
+                    "role": role,
+                    "joint": joint,
+                    "max_y": round(summary.max_y, 6),
+                    "normalized_max_y": round(normalized_max_y, 6),
+                    "threshold_normalized": HIGH_REGION_THRESHOLD_NORMALIZED,
+                }
+            )
     if not high_joints:
         return []
-    return [{"code": "high_region_weighted_by_torso_or_arm", "message": "Torso/arm role weights reach head/top model region.", "joints": high_joints}]
+    return [
+        {
+            "code": "high_region_weighted_by_torso_or_arm",
+            "message": "Torso/arm role weights reach head/top model region.",
+            "threshold_normalized": HIGH_REGION_THRESHOLD_NORMALIZED,
+            "joints": high_joints,
+        }
+    ]
+
+
+def _split_high_region_reasons(
+    high_region: list[dict[str, Any]],
+    *,
+    core_roles: dict[str, str],
+    unknown_required: list[str],
+    passive_nodes: list[str],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    if not high_region:
+        return [], []
+    has_required_core = all(role in core_roles for role in REQUIRED_CORE_ROLES)
+    high_joints = [joint for reason in high_region for joint in reason.get("joints", [])]
+    high_roles = {str(joint.get("role", "")) for joint in high_joints}
+    is_safe_shoulder_band = bool(high_joints) and high_roles.issubset(UPPER_ARM_HIGH_REGION_WARNING_ROLES)
+    upper_arm_joints = [joint for joint in high_joints if joint.get("role") in UPPER_ARM_ROLES]
+    upper_arms_below_cutoff = all(
+        float(joint.get("normalized_max_y", 1.0)) < UPPER_ARM_HIGH_REGION_WARNING_CUTOFF_NORMALIZED
+        for joint in upper_arm_joints
+    )
+    if is_safe_shoulder_band and upper_arms_below_cutoff and has_required_core and not unknown_required and not passive_nodes:
+        warnings = []
+        for reason in high_region:
+            warning = dict(reason)
+            warning["severity"] = "warning"
+            warning["upper_arm_warning_cutoff_normalized"] = UPPER_ARM_HIGH_REGION_WARNING_CUTOFF_NORMALIZED
+            warning["message"] = "Chest or moderate upper-arm role weights reach the high model region; retained as non-blocking semantic evidence."
+            warnings.append(warning)
+        return [], warnings
+    return high_region, []
 
 
 def _core_confidence(nodes: dict[str, SemanticBodyNode], core_roles: dict[str, str], high_region: list[dict[str, Any]], unknown_required: list[str]) -> float:

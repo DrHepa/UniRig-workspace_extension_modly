@@ -32,6 +32,10 @@ def write_embedded_skin_glb(
     hair_contamination: bool = False,
     mixed_classes: bool = False,
     missing_weights: bool = False,
+    shoulder_connectors: bool = False,
+    arm_high_region: bool = False,
+    high_region_role: str | None = None,
+    high_region_y: float = 1.584,
     extras: dict | None = None,
     semantic_connected: bool = False,
 ) -> Path:
@@ -58,12 +62,19 @@ def write_embedded_skin_glb(
     ]
     if semantic_connected:
         nodes[0].setdefault("children", []).append(11)
+    if shoulder_connectors:
+        left_shoulder_index = len(nodes)
+        right_shoulder_index = left_shoulder_index + 1
+        nodes[2]["children"] = [child for child in nodes[2].get("children", []) if child not in {12, 16}]
+        nodes[2]["children"].extend([left_shoulder_index, right_shoulder_index])
+        nodes.append({"name": "left_shoulder", "translation": [-0.3, 0.12, 0.0], "children": [12]})
+        nodes.append({"name": "right_shoulder", "translation": [0.3, 0.12, 0.0], "children": [16]})
     if sleeve or mixed_classes:
         nodes[13]["children"].append(15)
     if hand_leaf or mixed_classes:
         nodes[13].setdefault("children", []).append(len(nodes))
         nodes.append({"name": "left_watch_leaf", "translation": [-0.05, -0.3, 0.0]})
-    if hair_contamination or mixed_classes:
+    if mixed_classes:
         nodes[13].setdefault("children", []).append(len(nodes))
         nodes.append({"name": "left_hair_strand", "translation": [0.2, 0.75, 0.0]})
     joints = list(range(len(nodes)))
@@ -82,6 +93,23 @@ def write_embedded_skin_glb(
     if hair_contamination:
         positions.append((0.0, 2.35, 0.0))
         joint_rows.append((2, 0, 0, 0))
+    if arm_high_region:
+        positions.append((-0.7, 2.35, 0.0))
+        joint_rows.append((12, 0, 0, 0))
+    if high_region_role is not None:
+        role_to_joint = {
+            "chest": 2,
+            "left_upper_arm": 12,
+            "left_lower_arm": 13,
+            "left_hand": 14,
+            "right_upper_arm": 16,
+            "right_lower_arm": 17,
+            "right_hand": 18,
+        }
+        if high_region_role not in role_to_joint:
+            raise ValueError(f"unsupported synthetic high-region role: {high_region_role}")
+        positions.append((0.7, high_region_y, 0.0))
+        joint_rows.append((role_to_joint[high_region_role], 0, 0, 0))
     if mixed_classes:
         positions.append((-0.4, 2.35, 0.0))
         joint_rows.append((20, 0, 0, 0))
@@ -200,13 +228,68 @@ class HumanoidQualityGateTests(unittest.TestCase):
 
     def test_high_region_torso_or_arm_weighting_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory(prefix="unirig-qgate-") as temp_dir:
-            glb = write_embedded_skin_glb(Path(temp_dir) / "high-region.glb", hair_contamination=True)
+            glb = write_embedded_skin_glb(Path(temp_dir) / "high-region.glb", arm_high_region=True)
 
             with self.assertRaisesRegex(HumanoidQualityGateError, "unsafe_for_humanoid_retarget") as raised:
                 run_humanoid_quality_gate(read_glb_container(glb), _declared_roles())
 
             high_region = [reason for reason in raised.exception.diagnostic["reasons"] if reason["code"] == "high_region_weighted_by_torso_or_arm"]
-            self.assertEqual(high_region[0]["joints"], [{"role": "chest", "joint": "chest", "max_y": 2.35}])
+            self.assertEqual(high_region[0]["joints"][0]["role"], "left_upper_arm")
+            self.assertEqual(high_region[0]["joints"][0]["joint"], "left_upper_arm")
+            self.assertEqual(high_region[0]["joints"][0]["max_y"], 2.35)
+            self.assertEqual(high_region[0]["joints"][0]["normalized_max_y"], 1.0)
+            self.assertEqual(high_region[0]["joints"][0]["threshold_normalized"], 0.8)
+
+    def test_tolerated_upper_arm_warning_passes_and_is_preserved_in_quality_gate_provenance(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="unirig-qgate-") as temp_dir:
+            glb = write_embedded_skin_glb(
+                Path(temp_dir) / "upper-warning.glb",
+                hair_contamination=True,
+                high_region_role="right_upper_arm",
+                high_region_y=1.584,
+            )
+
+            report = run_humanoid_quality_gate(read_glb_container(glb), _declared_roles())
+
+            semantic_graph = report.diagnostic["semantic_body_graph"]
+            warning = semantic_graph["warnings"][0]
+            self.assertEqual(report.status, "passed")
+            self.assertEqual(semantic_graph["publishable"], True)
+            self.assertEqual(semantic_graph["predicates"]["has_high_region_contamination"], False)
+            self.assertEqual(warning["severity"], "warning")
+            self.assertEqual(warning["upper_arm_warning_cutoff_normalized"], 0.85)
+            self.assertEqual({joint["role"] for joint in warning["joints"]}, {"chest", "right_upper_arm"})
+
+    def test_non_local_spread_blocks_otherwise_tolerated_upper_arm_warning(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="unirig-qgate-") as temp_dir:
+            glb = write_embedded_skin_glb(
+                Path(temp_dir) / "upper-warning-non-local.glb",
+                hair_contamination=True,
+                high_region_role="right_upper_arm",
+                high_region_y=1.584,
+                non_local_weights=True,
+            )
+
+            with self.assertRaisesRegex(HumanoidQualityGateError, "unsafe_for_humanoid_retarget") as raised:
+                run_humanoid_quality_gate(read_glb_container(glb), _declared_roles())
+
+            reason_codes = {reason["code"] for reason in raised.exception.diagnostic["reasons"]}
+            self.assertIn("non_local_weight_spread", reason_codes)
+            self.assertNotIn("high_region_weighted_by_torso_or_arm", reason_codes)
+            self.assertEqual(raised.exception.diagnostic["semantic_body_graph"]["warnings"][0]["severity"], "warning")
+
+    def test_optional_shoulder_connectors_are_body_safe_and_not_nonseparable(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="unirig-qgate-") as temp_dir:
+            glb = write_embedded_skin_glb(Path(temp_dir) / "shoulders.glb", shoulder_connectors=True, hair_contamination=True)
+            declared = _declared_roles(include_shoulders=True)
+
+            report = run_humanoid_quality_gate(read_glb_container(glb), declared)
+
+            reason_codes = {reason["code"] for reason in report.diagnostic["semantic_body_graph"]["reasons"]}
+            self.assertEqual(report.status, "passed")
+            self.assertEqual(report.diagnostic["joint_classes"]["left_shoulder"], "body")
+            self.assertEqual(report.diagnostic["joint_classes"]["right_shoulder"], "body")
+            self.assertNotIn("anatomical_role_not_separable", reason_codes)
 
     def test_mixed_diagnostics_keep_body_clothing_hair_accessory_and_unknown_classes(self) -> None:
         with tempfile.TemporaryDirectory(prefix="unirig-qgate-") as temp_dir:
@@ -236,8 +319,8 @@ class HumanoidQualityGateTests(unittest.TestCase):
             self.assertEqual(report.diagnostic["semantic_body_graph"], semantic_report.as_diagnostic())
 
 
-def _declared_roles() -> dict:
-    return {
+def _declared_roles(*, include_shoulders: bool = False) -> dict:
+    roles = {
         "roles": {
             "hips": "hips", "spine": "spine", "chest": "chest", "neck": "neck", "head": "head",
             "left_upper_arm": "left_upper_arm", "left_lower_arm": "left_lower_arm", "left_hand": "left_hand",
@@ -246,6 +329,10 @@ def _declared_roles() -> dict:
             "right_upper_leg": "right_upper_leg", "right_lower_leg": "right_lower_leg", "right_foot": "right_foot",
         }
     }
+    if include_shoulders:
+        roles["roles"]["left_shoulder"] = "left_shoulder"
+        roles["roles"]["right_shoulder"] = "right_shoulder"
+    return roles
 
 
 if __name__ == "__main__":

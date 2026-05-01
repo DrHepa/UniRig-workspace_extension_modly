@@ -14,7 +14,9 @@ from .semantic_humanoid_resolver import SemanticHumanoidResolutionError, resolve
 
 
 class HumanoidResolutionFailure(ValueError):
-    pass
+    def __init__(self, message: str, diagnostics: list[dict[str, Any]] | None = None) -> None:
+        super().__init__(message)
+        self.diagnostics = diagnostics or []
 
 
 @dataclass(frozen=True)
@@ -23,6 +25,14 @@ class ResolvedHumanoidSource:
     payload: dict[str, Any]
     provenance: dict[str, Any]
     warnings: list[dict[str, str]]
+
+
+@dataclass(frozen=True)
+class HumanoidEvidenceProbe:
+    status: str
+    kind: str | None
+    path: str
+    diagnostics: list[dict[str, Any]]
 
 
 UNVERIFIED_TRUSTED_SOURCE_WARNING = {
@@ -82,7 +92,7 @@ def resolve_humanoid_source(output_path: Path) -> ResolvedHumanoidSource:
     try:
         payload = resolve_humanoid(glb_json)
     except SemanticHumanoidResolutionError as exc:
-        raise HumanoidResolutionFailure(str(exc)) from exc
+        raise HumanoidResolutionFailure(str(exc), diagnostics=exc.diagnostics) from exc
     semantic_report = _semantic_report_for(container, payload)
     quality_gate = _quality_gate_diagnostic(container, payload, semantic_report=semantic_report)
     provenance = {
@@ -105,6 +115,14 @@ def resolve_humanoid_source(output_path: Path) -> ResolvedHumanoidSource:
             }
         ],
     )
+
+
+def probe_humanoid_evidence(path: Path) -> HumanoidEvidenceProbe:
+    try:
+        resolved = resolve_humanoid_source(path)
+    except HumanoidResolutionFailure as exc:
+        return HumanoidEvidenceProbe(status="failed", kind=None, path=str(path), diagnostics=list(exc.diagnostics))
+    return HumanoidEvidenceProbe(status="resolved", kind=resolved.kind, path=str(path), diagnostics=[])
 
 
 def resolve_explicit_humanoid_source(output_path: Path, humanoid_source: dict[str, Any]) -> ResolvedHumanoidSource:

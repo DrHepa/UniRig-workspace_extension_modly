@@ -33,6 +33,7 @@ from unirig_ext.humanoid_contract import (
 from unirig_ext.metadata import build_sidecar, sidecar_path_for, write_sidecar
 from unirig_ext.humanoid_source import HumanoidResolutionFailure
 from fixtures.unirig_real_topology import real_unirig_40_payload
+from test_semantic_humanoid_resolver import short_trunk_output_payload
 
 
 def write_glb_json(target: Path, payload: dict) -> Path:
@@ -364,6 +365,37 @@ class MetadataTests(unittest.TestCase):
     def test_humanoid_mode_semantic_failure_is_actionable_before_done(self) -> None:
         with self.assertRaisesRegex(HumanoidResolutionFailure, "semantic resolver"):
             build_sidecar(self.output_mesh, self.input_mesh, 12345, self.context, metadata_mode="humanoid")
+
+    def test_humanoid_mode_with_resolving_input_and_insufficient_output_fails_closed_without_sidecar(self) -> None:
+        write_glb_json(self.input_mesh, real_unirig_40_payload())
+        write_glb_json(self.output_mesh, short_trunk_output_payload(prefix="out"))
+
+        with self.assertRaises(HumanoidResolutionFailure) as raised:
+            write_sidecar(self.output_mesh, self.input_mesh, 12345, self.context, metadata_mode="humanoid")
+
+        message = str(raised.exception)
+        self.assertIn("humanoid_output_contract_insufficient", message)
+        self.assertIn("semantic_spine_missing", message)
+        self.assertIn("source evidence resolved", message)
+        self.assertFalse(sidecar_path_for(self.output_mesh).exists())
+
+    def test_input_path_source_probe_is_diagnostic_only_and_never_publishes_source_roles(self) -> None:
+        write_glb_json(self.input_mesh, real_unirig_40_payload())
+        write_glb_json(self.output_mesh, short_trunk_output_payload(prefix="out"))
+
+        with self.assertRaises(HumanoidResolutionFailure) as raised:
+            build_sidecar(self.output_mesh, self.input_mesh, 12345, self.context, metadata_mode="humanoid")
+
+        diagnostic = json.loads(str(raised.exception))
+        self.assertEqual(diagnostic["code"], "humanoid_output_contract_insufficient")
+        self.assertEqual(diagnostic["source"]["status"], "resolved")
+        self.assertEqual(diagnostic["transfer"], {"status": "absent", "required": True})
+        self.assertEqual(diagnostic["output"]["joint_count"], 8)
+        self.assertEqual(diagnostic["output"]["root_count"], 1)
+        self.assertEqual(diagnostic["output"]["highest_path_length"], 2)
+        self.assertEqual(diagnostic["output"]["minimum_trunk_length"], 5)
+        self.assertNotIn("humanoid_contract", diagnostic)
+        self.assertNotIn("roles", diagnostic["source"])
 
     def test_auto_mode_success_records_semantic_resolver_source_kind(self) -> None:
         write_glb_json(self.output_mesh, real_unirig_40_payload())

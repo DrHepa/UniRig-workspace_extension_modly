@@ -27,6 +27,8 @@ if str(SRC) not in sys.path:
 from unirig_ext import blender_bridge, bootstrap, pipeline
 from unirig_ext.bootstrap import RuntimeContext
 from unirig_ext.humanoid_contract import HumanoidContractError
+from fixtures.unirig_real_topology import real_unirig_40_payload
+from test_semantic_humanoid_resolver import short_trunk_output_payload
 
 
 def write_minimal_valid_glb(target: Path) -> Path:
@@ -83,6 +85,20 @@ def write_minimal_valid_glb(target: Path) -> Path:
     blob += b"BIN\x00"
     blob += binary_chunk
 
+    target.write_bytes(blob)
+    return target
+
+
+def write_glb_json(target: Path, payload: dict) -> Path:
+    json_chunk = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    while len(json_chunk) % 4:
+        json_chunk += b" "
+    blob = bytearray(b"glTF")
+    blob += struct.pack("<I", 2)
+    blob += struct.pack("<I", 12 + 8 + len(json_chunk))
+    blob += struct.pack("<I", len(json_chunk))
+    blob += b"JSON"
+    blob += json_chunk
     target.write_bytes(blob)
     return target
 
@@ -770,6 +786,30 @@ class ProcessorProtocolTests(unittest.TestCase):
         self.assertEqual(result["messages"][-1]["type"], "error")
         self.assertIn("metadata_mode=humanoid", result["messages"][-1]["message"])
         self.assertIn("valid humanoid", result["messages"][-1]["message"])
+
+    def test_processor_humanoid_mode_insufficient_output_reports_contract_boundary_without_done(self) -> None:
+        write_glb_json(self.input_mesh, real_unirig_40_payload())
+
+        def configure_pipeline(pipeline_module: object, stack: ExitStack) -> None:
+            def fake_run(*, mesh_path: Path, params: dict, context: RuntimeContext, progress: Callable, log: Callable, workspace_dir: Path | None = None) -> Path:
+                del params, context, progress, log, workspace_dir
+                output_path = mesh_path.with_name(f"{mesh_path.stem}_unirig.glb")
+                write_glb_json(output_path, short_trunk_output_payload(prefix="out"))
+                return output_path
+
+            stack.enter_context(mock.patch.object(pipeline_module, "run", side_effect=fake_run))
+
+        result = self._run_processor_inprocess_with_pipeline_patches(
+            {"input": {"filePath": str(self.input_mesh), "nodeId": "rig-mesh"}, "params": {"seed": 37, "metadata_mode": "humanoid"}},
+            configure_pipeline=configure_pipeline,
+        )
+
+        self.assertNotEqual(result["exit_code"], 0)
+        self.assertFalse(any(message["type"] == "done" for message in result["messages"]))
+        self.assertEqual(result["messages"][-1]["type"], "error")
+        self.assertIn("humanoid_output_contract_insufficient", result["messages"][-1]["message"])
+        self.assertIn("semantic_spine_missing", result["messages"][-1]["message"])
+        self.assertIn("verified source-to-output transfer", result["messages"][-1]["message"])
 
     def test_processor_ignores_stage_override_environment_and_runs_upstream_path(self) -> None:
         trace_path = self.temp_dir / "hook-trace.jsonl"

@@ -163,6 +163,45 @@ def shoulderless_semantic_payload(*, prefix: str = "joint") -> dict:
     return {"asset": {"version": "2.0"}, "nodes": nodes, "skins": [{"joints": list(range(len(nodes))), "inverseBindMatrices": 0}]}
 
 
+def short_trunk_output_payload(*, prefix: str = "out") -> dict:
+    names = [
+        "hips",
+        "spine",
+        "left_upper_leg",
+        "left_lower_leg",
+        "left_foot",
+        "right_upper_leg",
+        "right_lower_leg",
+        "right_foot",
+        "loose_prop",
+    ]
+    edges = (
+        ("hips", "spine"),
+        ("hips", "left_upper_leg"),
+        ("left_upper_leg", "left_lower_leg"),
+        ("left_lower_leg", "left_foot"),
+        ("hips", "right_upper_leg"),
+        ("right_upper_leg", "right_lower_leg"),
+        ("right_lower_leg", "right_foot"),
+    )
+    translations = {
+        "hips": [0.0, 1.0, 0.0],
+        "spine": [0.0, 0.5, 0.0],
+        "left_upper_leg": [-0.18, -0.8, 0.0],
+        "left_lower_leg": [0.0, -0.8, 0.0],
+        "left_foot": [0.0, -0.25, 0.35],
+        "right_upper_leg": [0.18, -0.8, 0.0],
+        "right_lower_leg": [0.0, -0.8, 0.0],
+        "right_foot": [0.0, -0.25, 0.35],
+        "loose_prop": [0.0, 0.0, 0.0],
+    }
+    nodes = [{"name": f"{prefix}_{name}", "translation": translations[name]} for name in names]
+    index_by_name = {name: index for index, name in enumerate(names)}
+    for parent, child in edges:
+        nodes[index_by_name[parent]].setdefault("children", []).append(index_by_name[child])
+    return {"asset": {"version": "2.0"}, "nodes": nodes, "skins": [{"joints": list(range(8)), "inverseBindMatrices": 0}]}
+
+
 def delayed_chest_semantic_payload(*, prefix: str = "joint") -> dict:
     names = [
         "hips",
@@ -257,6 +296,172 @@ def delayed_chest_semantic_payload(*, prefix: str = "joint") -> dict:
     return {"asset": {"version": "2.0"}, "nodes": nodes, "skins": [{"joints": list(range(len(nodes))), "inverseBindMatrices": 0}]}
 
 
+def long_trunk_competing_chest_payload(*, prefix: str = "joint", false_pair: str = "head_side") -> dict:
+    names = [
+        "hips",
+        "spine_low",
+        "spine_mid",
+        "true_chest",
+        "upper_trunk",
+        "neck",
+        "head",
+        "true_left_shoulder",
+        "true_left_upper_arm",
+        "true_left_lower_arm",
+        "true_left_hand",
+        "true_right_shoulder",
+        "true_right_upper_arm",
+        "true_right_lower_arm",
+        "true_right_hand",
+        "false_left_root",
+        "false_left_mid",
+        "false_left_tip",
+        "false_left_end",
+        "false_right_root",
+        "false_right_mid",
+        "false_right_tip",
+        "false_right_end",
+        "left_upper_leg",
+        "left_lower_leg",
+        "left_foot",
+        "right_upper_leg",
+        "right_lower_leg",
+        "right_foot",
+    ]
+    edges = (
+        ("hips", "spine_low"),
+        ("spine_low", "spine_mid"),
+        ("spine_mid", "true_chest"),
+        ("true_chest", "upper_trunk"),
+        ("upper_trunk", "neck"),
+        ("neck", "head"),
+        ("true_chest", "true_left_shoulder"),
+        ("true_left_shoulder", "true_left_upper_arm"),
+        ("true_left_upper_arm", "true_left_lower_arm"),
+        ("true_left_lower_arm", "true_left_hand"),
+        ("true_chest", "true_right_shoulder"),
+        ("true_right_shoulder", "true_right_upper_arm"),
+        ("true_right_upper_arm", "true_right_lower_arm"),
+        ("true_right_lower_arm", "true_right_hand"),
+        ("upper_trunk", "false_left_root"),
+        ("false_left_root", "false_left_mid"),
+        ("false_left_mid", "false_left_tip"),
+        ("false_left_tip", "false_left_end"),
+        ("upper_trunk", "false_right_root"),
+        ("false_right_root", "false_right_mid"),
+        ("false_right_mid", "false_right_tip"),
+        ("false_right_tip", "false_right_end"),
+        ("hips", "left_upper_leg"),
+        ("left_upper_leg", "left_lower_leg"),
+        ("left_lower_leg", "left_foot"),
+        ("hips", "right_upper_leg"),
+        ("right_upper_leg", "right_lower_leg"),
+        ("right_lower_leg", "right_foot"),
+    )
+    translations = {
+        "hips": [0.0, 1.0, 0.0],
+        "spine_low": [0.0, 0.45, 0.0],
+        "spine_mid": [0.0, 0.35, 0.0],
+        "true_chest": [0.0, 0.3, 0.0],
+        "upper_trunk": [0.0, 0.28, 0.0],
+        "neck": [0.0, 0.25, 0.0],
+        "head": [0.0, 0.35, 0.0],
+        "true_left_shoulder": [-0.22, -0.02, 0.0],
+        "true_left_upper_arm": [-0.28, -0.16, 0.0],
+        "true_left_lower_arm": [-0.24, -0.14, 0.0],
+        "true_left_hand": [-0.12, -0.08, 0.0],
+        "true_right_shoulder": [0.22, -0.02, 0.0],
+        "true_right_upper_arm": [0.28, -0.16, 0.0],
+        "true_right_lower_arm": [0.24, -0.14, 0.0],
+        "true_right_hand": [0.12, -0.08, 0.0],
+        "left_upper_leg": [-0.18, -0.8, 0.0],
+        "left_lower_leg": [0.0, -0.8, 0.0],
+        "left_foot": [0.0, -0.25, 0.35],
+        "right_upper_leg": [0.18, -0.8, 0.0],
+        "right_lower_leg": [0.0, -0.8, 0.0],
+        "right_foot": [0.0, -0.25, 0.35],
+    }
+    false_translations = {
+        "head_side": {
+            "false_left_root": [-0.34, 0.08, 0.0],
+            "false_left_mid": [-0.06, 0.05, 0.0],
+            "false_left_tip": [-0.04, 0.04, 0.0],
+            "false_left_end": [-0.03, 0.02, 0.0],
+            "false_right_root": [0.34, 0.08, 0.0],
+            "false_right_mid": [0.06, 0.05, 0.0],
+            "false_right_tip": [0.04, 0.04, 0.0],
+            "false_right_end": [0.03, 0.02, 0.0],
+        },
+        "same_side": {
+            "false_left_root": [0.18, -0.02, 0.0],
+            "false_left_mid": [0.16, -0.12, 0.0],
+            "false_left_tip": [0.14, -0.12, 0.0],
+            "false_left_end": [0.08, -0.08, 0.0],
+            "false_right_root": [0.46, -0.02, 0.0],
+            "false_right_mid": [0.18, -0.12, 0.0],
+            "false_right_tip": [0.12, -0.12, 0.0],
+            "false_right_end": [0.06, -0.08, 0.0],
+        },
+        "centered": {
+            "false_left_root": [0.01, -0.02, 0.0],
+            "false_left_mid": [0.02, -0.12, 0.0],
+            "false_left_tip": [0.01, -0.12, 0.0],
+            "false_left_end": [0.0, -0.08, 0.0],
+            "false_right_root": [0.38, -0.02, 0.0],
+            "false_right_mid": [0.18, -0.12, 0.0],
+            "false_right_tip": [0.12, -0.12, 0.0],
+            "false_right_end": [0.06, -0.08, 0.0],
+        },
+        "ambiguous": {
+            "false_left_root": [-0.23, -0.02, 0.0],
+            "false_left_mid": [-0.27, -0.16, 0.0],
+            "false_left_tip": [-0.23, -0.14, 0.0],
+            "false_left_end": [-0.12, -0.08, 0.0],
+            "false_right_root": [0.23, -0.02, 0.0],
+            "false_right_mid": [0.27, -0.16, 0.0],
+            "false_right_tip": [0.23, -0.14, 0.0],
+            "false_right_end": [0.12, -0.08, 0.0],
+        },
+    }
+    if false_pair not in false_translations:
+        raise ValueError(f"unknown false_pair: {false_pair}")
+    translations.update(false_translations[false_pair])
+    nodes = [{"name": f"{prefix}_{name}", "translation": translations[name]} for name in names]
+    index_by_name = {name: index for index, name in enumerate(names)}
+    for parent, child in edges:
+        nodes[index_by_name[parent]].setdefault("children", []).append(index_by_name[child])
+    return {"asset": {"version": "2.0"}, "nodes": nodes, "skins": [{"joints": list(range(len(nodes))), "inverseBindMatrices": 0}]}
+
+
+def long_trunk_without_true_arms_payload(*, prefix: str = "joint", false_pair: str) -> dict:
+    payload = long_trunk_competing_chest_payload(prefix=prefix, false_pair=false_pair)
+    index_by_name = {node["name"]: index for index, node in enumerate(payload["nodes"])}
+    true_chest = payload["nodes"][index_by_name[f"{prefix}_true_chest"]]
+    true_chest["children"] = [index_by_name[f"{prefix}_upper_trunk"]]
+    detached = {
+        index_by_name[f"{prefix}_{name}"]
+        for name in (
+            "true_left_shoulder",
+            "true_left_upper_arm",
+            "true_left_lower_arm",
+            "true_left_hand",
+            "true_right_shoulder",
+            "true_right_upper_arm",
+            "true_right_lower_arm",
+            "true_right_hand",
+        )
+    }
+    payload["skins"][0]["joints"] = [index for index in payload["skins"][0]["joints"] if index not in detached]
+    return payload
+
+
+def renamed_payload(source: dict, *, prefix: str) -> dict:
+    renamed = copy.deepcopy(source)
+    for index, node in enumerate(renamed["nodes"]):
+        node["name"] = f"{prefix}_{index:02d}"
+    return renamed
+
+
 def shifted_real_payload(source: dict, edges: tuple[tuple[str, str], ...], *, offset: int) -> dict:
     shifted = {f"bone_{number}": f"joint_{number + offset}" for number in range(len(source["skins"][0]["joints"]))}
     renamed = copy.deepcopy(source)
@@ -320,6 +525,49 @@ class SemanticHumanoidResolverTests(unittest.TestCase):
         self.assertEqual(declared["roles"]["right_upper_arm"], "anon_right_upper_arm")
         self.assertEqual(declared["roles"]["right_lower_arm"], "anon_right_lower_arm")
         self.assertEqual(declared["roles"]["right_hand"], "anon_right_hand")
+
+    def test_long_trunk_chest_selection_prefers_lower_balanced_arm_evidence_over_head_side_competitor(self) -> None:
+        declared = resolve_humanoid(long_trunk_competing_chest_payload(prefix="anon"))
+
+        self.assertEqual(declared["roles"]["chest"], "anon_true_chest")
+        self.assertEqual(declared["roles"]["left_upper_arm"], "anon_true_left_upper_arm")
+        self.assertEqual(declared["roles"]["left_lower_arm"], "anon_true_left_lower_arm")
+        self.assertEqual(declared["roles"]["left_hand"], "anon_true_left_hand")
+        self.assertEqual(declared["roles"]["right_upper_arm"], "anon_true_right_upper_arm")
+        self.assertEqual(declared["roles"]["right_lower_arm"], "anon_true_right_lower_arm")
+        self.assertEqual(declared["roles"]["right_hand"], "anon_true_right_hand")
+
+    def test_long_trunk_chest_selection_is_independent_of_exact_joint_names(self) -> None:
+        renamed = renamed_payload(long_trunk_competing_chest_payload(prefix="source"), prefix="randomized")
+        declared = resolve_humanoid(renamed)
+
+        self.assertEqual(declared["roles"]["chest"], "randomized_03")
+        self.assertEqual(declared["roles"]["left_upper_arm"], "randomized_08")
+        self.assertEqual(declared["roles"]["right_upper_arm"], "randomized_12")
+
+    def test_same_side_branch_pairs_do_not_count_as_chest_arm_evidence(self) -> None:
+        payload = long_trunk_without_true_arms_payload(prefix="anon", false_pair="same_side")
+
+        with self.assertRaisesRegex(SemanticHumanoidResolutionError, "semantic_chest_missing") as raised:
+            resolve_humanoid(payload)
+
+        self.assertIn("symmetric arm evidence", raised.exception.diagnostics[0]["message"])
+
+    def test_centered_branch_pairs_do_not_count_as_chest_arm_evidence(self) -> None:
+        payload = long_trunk_without_true_arms_payload(prefix="anon", false_pair="centered")
+
+        with self.assertRaisesRegex(SemanticHumanoidResolutionError, "semantic_chest_missing") as raised:
+            resolve_humanoid(payload)
+
+        self.assertIn("symmetric arm evidence", raised.exception.diagnostics[0]["message"])
+
+    def test_genuine_long_trunk_chest_ambiguity_fails_closed(self) -> None:
+        payload = long_trunk_competing_chest_payload(prefix="anon", false_pair="ambiguous")
+
+        with self.assertRaisesRegex(SemanticHumanoidResolutionError, "semantic_chest_") as raised:
+            resolve_humanoid(payload)
+
+        self.assertIn(raised.exception.diagnostics[0]["code"], {"semantic_chest_missing", "semantic_chest_ambiguous"})
 
     def test_leg_selection_ignores_extra_centered_hip_branches_when_clear_lateral_pair_exists(self) -> None:
         payload = minimal_semantic_payload(prefix="anon")
@@ -477,6 +725,18 @@ class SemanticHumanoidResolverTests(unittest.TestCase):
 
         with self.assertRaisesRegex(SemanticHumanoidResolutionError, "semantic_arm_chain_missing"):
             resolve_humanoid(payload)
+
+    def test_short_trunk_output_reports_graph_metrics_in_spine_diagnostic(self) -> None:
+        with self.assertRaisesRegex(SemanticHumanoidResolutionError, "semantic_spine_missing") as raised:
+            resolve_humanoid(short_trunk_output_payload(prefix="out"))
+
+        diagnostic = raised.exception.diagnostics[0]
+        self.assertEqual(diagnostic["code"], "semantic_spine_missing")
+        self.assertEqual(diagnostic["joint_count"], 8)
+        self.assertEqual(diagnostic["root_count"], 1)
+        self.assertEqual(diagnostic["highest_path_length"], 2)
+        self.assertEqual(diagnostic["minimum_trunk_length"], 5)
+        self.assertEqual(diagnostic["highest_path"], ["out_hips", "out_spine"])
 
     def test_real_unirig_52_variant_matches_profile_role_oracle_through_semantics(self) -> None:
         declared = resolve_humanoid(real_unirig_52_payload())
