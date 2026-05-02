@@ -54,8 +54,17 @@ python3 -m unirig_ext.humanoid_corpus_cli \
   "/path/to/exports/*.glb" \
   --json-out /tmp/unirig-corpus-profile.json \
   --markdown-out /tmp/unirig-corpus-profile.md \
+  --limit 24 \
   --hash
 ```
+
+For long corpora, `--limit N` profiles the first `N` selected GLBs after deterministic path sorting and marks the report as limited. Progress is emitted only on stderr as tab-separated lines:
+
+```text
+{index}/{total}\t{path}\tSTARTED|OK|FAILED
+```
+
+stdout is reserved for a deterministic final summary, for example `status=limited selected=2 completed=2 failed=0 partial=false limited=true`. JSON reports include `report_status`, `is_partial`, `is_limited`, `assets_selected`, `assets_completed`, and `assets_failed`. During row-oriented profiling, the JSON output is refreshed atomically after each completed asset so partial results remain valid JSON; Markdown is still generated from JSON only and visibly warns when a report is partial or limited.
 
 The profiler is intentionally **read-only**:
 

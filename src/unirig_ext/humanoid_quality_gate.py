@@ -23,7 +23,13 @@ class HumanoidQualityReport:
     diagnostic: dict[str, Any]
 
 
-def run_humanoid_quality_gate(container: GlbContainer, declared: dict[str, Any], *, semantic_report: SemanticBodyReport | None = None) -> HumanoidQualityReport:
+def run_humanoid_quality_gate(
+    container: GlbContainer,
+    declared: dict[str, Any],
+    *,
+    semantic_report: SemanticBodyReport | None = None,
+    weight_analysis: tuple[dict[str, JointWeightSummary], dict[str, Any]] | None = None,
+) -> HumanoidQualityReport:
     if not has_skinned_mesh_primitives(container.json):
         return HumanoidQualityReport(
             status="not_applicable",
@@ -34,12 +40,12 @@ def run_humanoid_quality_gate(container: GlbContainer, declared: dict[str, Any],
             },
         )
     try:
-        semantic_report = semantic_report or build_semantic_body_report(container, declared)
+        semantic_report = semantic_report or build_semantic_body_report(container, declared, weight_analysis=weight_analysis)
     except GltfSkinAnalysisError as exc:
         _raise_skin_weight_unavailable(exc)
     graph = extract_joint_graph(container.json)
     roles = declared.get("roles") if isinstance(declared.get("roles"), dict) else {}
-    summaries, weight_summary = _summarize_weights(container)
+    summaries, weight_summary = weight_analysis if weight_analysis is not None else _summarize_weights(container)
     joint_classes = _classify_joints_from_semantic_report(semantic_report, graph) if semantic_report is not None else _classify_joints(graph, roles, summaries)
     reasons: list[dict[str, Any]] = []
     if semantic_report is None:

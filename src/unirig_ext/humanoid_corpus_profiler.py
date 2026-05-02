@@ -3,8 +3,9 @@ from __future__ import annotations
 import glob
 import hashlib
 import json
+import tempfile
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 from .gltf_skin_analysis import GltfSkinAnalysisError, read_glb_container, summarize_joint_weights
 from .humanoid_contract import HumanoidContractError, build_contract_from_declared_data
@@ -48,6 +49,7 @@ REASON_CODE_ORDER = [
 PASSIVE_CODES = {"sleeve_branch_under_arm", "non_anatomical_leaf_under_arm", "semantic_passive_noncontract_subtree"}
 AMBIGUITY_CODES = {"semantic_symmetry_ambiguous", "semantic_leg_symmetry_ambiguous", "semantic_graph_ambiguous"}
 MISSING_SKIN_CODES = {"semantic_skin_missing", "semantic_skin_malformed", "skin_weight_data_unavailable"}
+ProgressCallback = Callable[[int, int, str, str], None]
 
 
 class CorpusInputError(ValueError):
@@ -58,7 +60,9 @@ class CorpusOutputError(ValueError):
     pass
 
 
-def select_glb_inputs(inputs: Iterable[str | Path]) -> list[Path]:
+def select_glb_inputs(inputs: Iterable[str | Path], *, limit: int | None = None) -> list[Path]:
+    if limit is not None and limit < 1:
+        raise CorpusInputError(f"limit must be a positive integer; got {limit}")
     selected: list[Path] = []
     raw_inputs = list(inputs)
     if not raw_inputs:
@@ -92,6 +96,8 @@ def select_glb_inputs(inputs: Iterable[str | Path]) -> list[Path]:
     paths = sorted(unique.values(), key=_path_sort_key)
     for path in paths:
         _validate_readable_glb(path)
+    if limit is not None:
+        return paths[:limit]
     return paths
 
 
@@ -105,24 +111,64 @@ def validate_output_parent(path: str | Path) -> Path:
     return output
 
 
-def build_corpus_report(inputs: Iterable[str | Path], *, include_hash: bool = False) -> dict[str, Any]:
-    paths = select_glb_inputs(inputs)
+def build_corpus_report(
+    inputs: Iterable[str | Path],
+    *,
+    include_hash: bool = False,
+    limit: int | None = None,
+    progress_callback: ProgressCallback | None = None,
+    json_refresh_path: str | Path | None = None,
+) -> dict[str, Any]:
+    output = validate_output_parent(json_refresh_path) if json_refresh_path is not None else None
+    paths = select_glb_inputs(inputs, limit=limit)
     base = _common_parent(paths)
-    rows = [_profile_asset(path, base=base, include_hash=include_hash) for path in paths]
+    rows: list[dict[str, Any]] = []
+    total = len(paths)
+    for index, path in enumerate(paths, start=1):
+        display_path = _display_path(path, base)
+        if progress_callback is not None:
+            progress_callback(index, total, display_path, "STARTED")
+        try:
+            row = _profile_asset(path, base=base, include_hash=include_hash)
+        except Exception as exc:
+            row = _failed_profile_row(path, base=base, include_hash=include_hash, exc=exc)
+        rows.append(row)
+        terminal_status = str(row.get("profile_status", "OK"))
+        if progress_callback is not None:
+            progress_callback(index, total, display_path, terminal_status)
+        if output is not None:
+            write_json_report_atomic(build_corpus_report_from_rows(rows, assets_selected=total, is_limited=limit is not None), output)
+    return build_corpus_report_from_rows(rows, assets_selected=total, is_limited=limit is not None)
+
+
+def build_corpus_report_from_rows(rows: list[dict[str, Any]], *, assets_selected: int, is_limited: bool) -> dict[str, Any]:
     family_counts = {family: 0 for family in FAMILY_PRECEDENCE}
     resolver_counts: dict[str, int] = {}
     quality_counts: dict[str, int] = {}
     contract_counts: dict[str, int] = {}
     reason_counts: dict[str, int] = {}
+    assets_completed = 0
+    assets_failed = 0
     for row in rows:
         family_counts[row["primary_family"]] += 1
+        if row.get("profile_status") == "FAILED":
+            assets_failed += 1
+        else:
+            assets_completed += 1
         _increment(resolver_counts, str(row["resolver"]["status"]))
         _increment(quality_counts, str(row["quality_gate"]["status"]))
         _increment(contract_counts, str(row["contract_readiness"]["status"]))
         for code in row.get("secondary_reason_codes", []):
             _increment(reason_counts, str(code))
+    is_partial = assets_completed + assets_failed < assets_selected
     report = {
         "schema_version": SCHEMA_VERSION,
+        "report_status": _report_status(is_partial=is_partial, is_limited=is_limited, assets_failed=assets_failed),
+        "is_partial": is_partial,
+        "is_limited": is_limited,
+        "assets_selected": assets_selected,
+        "assets_completed": assets_completed,
+        "assets_failed": assets_failed,
         "corpus_summary": {
             "total_assets": len(rows),
             "parseable_assets": sum(1 for row in rows if row.get("parse_status") == "parsed"),
@@ -138,6 +184,18 @@ def build_corpus_report(inputs: Iterable[str | Path], *, include_hash: bool = Fa
         "reason_codes": [{"code": code, "count": reason_counts[code]} for code in _sorted_reason_codes(reason_counts)],
     }
     return report
+
+
+def _report_status(*, is_partial: bool, is_limited: bool, assets_failed: int) -> str:
+    if is_partial:
+        return "partial"
+    if is_limited and assets_failed:
+        return "limited_with_failures"
+    if is_limited:
+        return "limited"
+    if assets_failed:
+        return "complete_with_failures"
+    return "complete"
 
 
 def classify_asset_family(row: dict[str, Any]) -> dict[str, Any]:
@@ -181,6 +239,32 @@ def write_json_report(report: dict[str, Any], path: str | Path) -> Path:
     return output
 
 
+def write_json_report_atomic(report: dict[str, Any], path: str | Path) -> Path:
+    output = validate_output_parent(path)
+    parent = output.parent if output.parent != Path("") else Path(".")
+    handle = tempfile.NamedTemporaryFile(
+        "w",
+        encoding="utf-8",
+        dir=parent,
+        prefix=f".{output.name}.",
+        suffix=".tmp",
+        delete=False,
+    )
+    temp_path = Path(handle.name)
+    try:
+        with handle:
+            handle.write(dumps_canonical_json(report))
+            handle.flush()
+        temp_path.replace(output)
+    except Exception:
+        try:
+            temp_path.unlink()
+        except OSError:
+            pass
+        raise
+    return output
+
+
 def write_markdown_report_from_json(report: dict[str, Any], path: str | Path) -> Path:
     output = validate_output_parent(path)
     output.write_text(render_markdown_from_report_json(report), encoding="utf-8")
@@ -196,13 +280,27 @@ def render_markdown_from_report_json(report: dict[str, Any]) -> str:
         "",
         "> Diagnostic only: this report is not publication evidence and does not relax resolver, contract, or quality gates.",
         "",
-        "## Corpus Summary",
-        f"- Total assets: {summary.get('total_assets', 0)}",
-        f"- Parseable assets: {summary.get('parseable_assets', 0)}",
-        f"- Publication evidence: {summary.get('publication_evidence', False)}",
-        "",
-        "## Family Counts",
     ]
+    if report.get("is_partial") or report.get("is_limited"):
+        lines.extend(
+            [
+                f"> WARNING: report_status={report.get('report_status')} selected={report.get('assets_selected', 0)} completed={report.get('assets_completed', 0)} failed={report.get('assets_failed', 0)}.",
+                "> This is a partial or limited selection report; do not treat it as complete corpus evidence.",
+                "",
+            ]
+        )
+        if report.get("is_limited"):
+            lines.extend(["> WARNING: limited selection was requested; unselected assets are absent from this report.", ""])
+    lines.extend(
+        [
+            "## Corpus Summary",
+            f"- Total assets: {summary.get('total_assets', 0)}",
+            f"- Parseable assets: {summary.get('parseable_assets', 0)}",
+            f"- Publication evidence: {summary.get('publication_evidence', False)}",
+            "",
+            "## Family Counts",
+        ]
+    )
     for family in FAMILY_PRECEDENCE:
         item = family_summaries.get(family, {}) if isinstance(family_summaries.get(family), dict) else {}
         lines.append(f"- {family}: {item.get('count', 0)}")
@@ -224,8 +322,10 @@ def render_markdown_from_report_json(report: dict[str, Any]) -> str:
 def _profile_asset(path: Path, *, base: Path, include_hash: bool) -> dict[str, Any]:
     digest = _sha256_file(path)
     row = _base_row(path, base=base, sha256=digest if include_hash else None)
+    weight_analysis: tuple[dict[str, Any], dict[str, Any]] | None = None
     try:
         container = read_glb_container(path)
+        row["profile_status"] = "OK"
         row["parse_status"] = "parsed"
         gltf = container.json
         row["node_count"] = len(gltf.get("nodes")) if isinstance(gltf.get("nodes"), list) else 0
@@ -239,7 +339,8 @@ def _profile_asset(path: Path, *, base: Path, include_hash: bool) -> dict[str, A
         except Exception as exc:  # graph errors are represented through resolver failure below
             row["diagnostics"].append(_diagnostic_from_exception("joint_graph", exc))
         try:
-            summaries, _weight_summary = summarize_joint_weights(container)
+            weight_analysis = summarize_joint_weights(container)
+            summaries, _weight_summary = weight_analysis
             row["weighted_joint_count"] = len(summaries)
         except Exception as exc:
             row["diagnostics"].append(_diagnostic_from_exception("weight_summary", exc))
@@ -248,8 +349,8 @@ def _profile_asset(path: Path, *, base: Path, include_hash: bool) -> dict[str, A
         contract = build_contract_from_declared_data(declared, source_hash=digest, output_hash=digest)
         row["contract_readiness"] = {"status": "ready", "ready": True, "failure_code": None}
         try:
-            semantic_report = build_semantic_body_report(container, declared)
-            quality = run_humanoid_quality_gate(container, declared, semantic_report=semantic_report)
+            semantic_report = build_semantic_body_report(container, declared, weight_analysis=weight_analysis)
+            quality = run_humanoid_quality_gate(container, declared, semantic_report=semantic_report, weight_analysis=weight_analysis)
             row["quality_gate"] = {"status": quality.status, "reasons": [], "diagnostic": quality.diagnostic}
         except HumanoidQualityGateError as exc:
             row["quality_gate"] = {"status": "failed", "reasons": _reason_dicts(exc.diagnostic), "diagnostic": exc.diagnostic}
@@ -269,6 +370,9 @@ def _profile_asset(path: Path, *, base: Path, include_hash: bool) -> dict[str, A
     except Exception as exc:
         _mark_unparseable(row, exc)
     classification = classify_asset_family(row)
+    if row.get("parse_status") == "unparseable":
+        row["profile_status"] = "FAILED"
+        row["failure"] = _failure_payload("profile_failed", "row_profile_error", _failure_message_from_row(row))
     row.update(classification)
     return row
 
@@ -279,6 +383,7 @@ def _base_row(path: Path, *, base: Path, sha256: str | None) -> dict[str, Any]:
         "name": path.name,
         "size_bytes": path.stat().st_size,
         "sha256": sha256,
+        "profile_status": "OK",
         "parse_status": "not_run",
         "node_count": 0,
         "skin_count": 0,
@@ -293,6 +398,28 @@ def _base_row(path: Path, *, base: Path, sha256: str | None) -> dict[str, Any]:
         "diagnostics": [],
         "publication_evidence": False,
     }
+
+
+def _failed_profile_row(path: Path, *, base: Path, include_hash: bool, exc: Exception) -> dict[str, Any]:
+    row = _base_row(path, base=base, sha256=_sha256_file(path) if include_hash else None)
+    row["profile_status"] = "FAILED"
+    row["parse_status"] = "unparseable"
+    row["failure"] = _failure_payload("profile_failed", "row_profile_error", str(exc))
+    row["diagnostics"].append({"code": "profile_failed", "message": str(exc)})
+    row.update(classify_asset_family(row))
+    return row
+
+
+def _failure_payload(code: str, category: str, message: str) -> dict[str, str]:
+    return {"code": code, "category": category, "message": message or "asset profiling failed"}
+
+
+def _failure_message_from_row(row: dict[str, Any]) -> str:
+    diagnostics = row.get("diagnostics") if isinstance(row.get("diagnostics"), list) else []
+    for diagnostic in diagnostics:
+        if isinstance(diagnostic, dict) and diagnostic.get("message"):
+            return str(diagnostic["message"])
+    return "asset could not be parsed or profiled"
 
 
 def _mark_unparseable(row: dict[str, Any], exc: Exception) -> None:

@@ -102,7 +102,7 @@ Humanoid contract rules:
 The profiler is exposed as:
 
 ```bash
-python3 -m unirig_ext.humanoid_corpus_cli <directory|glob|file...> --json-out /tmp/report.json [--markdown-out /tmp/report.md] [--hash]
+python3 -m unirig_ext.humanoid_corpus_cli <directory|glob|file...> --json-out /tmp/report.json [--markdown-out /tmp/report.md] [--limit N] [--hash]
 ```
 
 Architectural boundaries:
@@ -110,6 +110,8 @@ Architectural boundaries:
 - It does not add a `manifest.json` node and does not change `processor.py`.
 - It does not write `.rigmeta.json`, mutate GLB bytes, emit Modly `done`, or participate in runtime publication.
 - Its JSON report is authoritative for diagnostics; Markdown is generated only from that JSON.
+- Long corpus runs are row-oriented: progress is emitted to stderr as `{index}/{total}\t{path}\tSTARTED|OK|FAILED`, stdout is a deterministic final summary, and JSON output is atomically refreshed after terminal rows so partial results remain valid JSON.
+- `--limit N` applies after deterministic input sorting and marks reports as limited. Reports also expose `report_status`, `is_partial`, `is_limited`, `assets_selected`, `assets_completed`, and `assets_failed` so partial/limited output cannot be confused with complete corpus evidence.
 - It assigns one primary evidence/failure family per asset and preserves overlapping evidence as secondary reason codes.
 - It can guide future resolver, quality-gate, verified-transfer, or upstream-rigging work, but the report itself is never humanoid publication evidence.
 

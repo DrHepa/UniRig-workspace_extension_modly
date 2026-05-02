@@ -79,12 +79,17 @@ class SemanticBodyReport:
         return dict(self.diagnostic)
 
 
-def build_semantic_body_report(container: GlbContainer, declared: dict[str, Any]) -> SemanticBodyReport:
+def build_semantic_body_report(
+    container: GlbContainer,
+    declared: dict[str, Any],
+    *,
+    weight_analysis: tuple[dict[str, JointWeightSummary], dict[str, Any]] | None = None,
+) -> SemanticBodyReport:
     # Guardrail: this post-GLB evidence layer classifies and gates contract roles;
     # it does not mutate generated skin weights or replace upstream pre-rig segmentation.
     graph = extract_joint_graph(container.json)
     roles = declared.get("roles") if isinstance(declared.get("roles"), dict) else {}
-    summaries, weight_summary = summarize_joint_weights(container)
+    summaries, weight_summary = weight_analysis if weight_analysis is not None else summarize_joint_weights(container)
     role_by_joint = {str(joint): str(role) for role, joint in roles.items()}
     passive_roots = _passive_branch_roots(graph, roles)
     high_region = _high_region_reasons(roles, summaries, weight_summary)
