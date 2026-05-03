@@ -13,8 +13,26 @@ from . import blender_bridge, io
 from .bootstrap import LINUX_ARM64_PERSISTED_STAGE_PROOF_NAMES, REAL_RUNTIME_MODE, RuntimeContext, UniRigError, stage_environment
 
 
+@dataclass(frozen=True)
+class StageFailureDiagnostic:
+    run_id: str = ""
+    stage: str = ""
+    error_code: str = ""
+    original_input: str = ""
+    staged_input: str = ""
+    runtime_input: str = ""
+    expected_output: str = ""
+    result_json: str = ""
+    stage_log: str = ""
+    stdout_tail: str = ""
+    stderr_tail: str = ""
+    blender_returncode: int | str | None = None
+
+
 class PipelineError(UniRigError):
-    pass
+    def __init__(self, message: str, *, diagnostic: StageFailureDiagnostic | None = None) -> None:
+        super().__init__(message)
+        self.diagnostic = diagnostic
 
 
 ProgressFn = Callable[[int, str], None]
@@ -30,6 +48,10 @@ WINDOWS_NATIVE_ACCESS_VIOLATION_CODES = {3221225477, -1073741819}
 RUNTIME_STAGE_TOKEN = "run-processor"
 WRAPPER_RUNTIME_BOUNDARY_OWNER = "wrapper-venv-python"
 BLENDER_SUBPROCESS_TIMEOUT_SECONDS = 1800
+DIAGNOSTIC_TAIL_MAX_LINES = 40
+DIAGNOSTIC_TAIL_MAX_BYTES = 8192
+UNAVAILABLE = "<unavailable>"
+NOT_CAPTURED = "(not captured)"
 
 
 @dataclass(frozen=True)
@@ -43,6 +65,8 @@ class ExecutionStage:
     runtime_input_path: Path | None = None
     log_stage_name: str | None = None
     payload_seed: int = 12345
+    original_input_path: Path | None = None
+    staged_input_path: Path | None = None
 
 
 def run(
@@ -102,6 +126,7 @@ def _run_real_pipeline(
         run_dir=run_dir,
         context=context,
         seed=seed,
+        staged_input_path=staged_input,
     )
     staged_files = [stage.runtime_input_path for stage in plan if stage.runtime_input_path is not None]
 
@@ -135,8 +160,8 @@ def build_execution_plan(
     run_dir: Path,
     context: RuntimeContext,
     seed: int,
+    staged_input_path: Path | None = None,
 ) -> list[ExecutionStage]:
-    del mesh_path
 
     stage_token = RUNTIME_STAGE_TOKEN
     blender_subprocess_stages = _linux_arm64_blender_subprocess_stage_names(context)
@@ -166,6 +191,8 @@ def build_execution_plan(
             runtime_input_path=staged_prepared,
             log_stage_name="extract-prepare",
             payload_seed=seed,
+            original_input_path=mesh_path,
+            staged_input_path=staged_input_path or prepared_path,
         ),
         ExecutionStage(
             name="skeleton",
@@ -185,6 +212,8 @@ def build_execution_plan(
             runtime_input_path=staged_prepared,
             log_stage_name="skeleton",
             payload_seed=seed,
+            original_input_path=mesh_path,
+            staged_input_path=staged_input_path or prepared_path,
         ),
         ExecutionStage(
             name="extract-skin",
@@ -202,6 +231,8 @@ def build_execution_plan(
             runtime_input_path=staged_skeleton,
             log_stage_name="extract-skin",
             payload_seed=seed,
+            original_input_path=mesh_path,
+            staged_input_path=staged_input_path or prepared_path,
         ),
         ExecutionStage(
             name="skin",
@@ -220,6 +251,8 @@ def build_execution_plan(
             runtime_input_name=staged_skeleton.name,
             runtime_input_path=staged_skeleton,
             log_stage_name="skin",
+            original_input_path=mesh_path,
+            staged_input_path=staged_input_path or prepared_path,
         ),
         ExecutionStage(
             name="merge",
@@ -228,6 +261,8 @@ def build_execution_plan(
             success_path=merged_output,
             runtime_boundary_owner=_runtime_boundary_owner_for_stage("merge", blender_subprocess_stages),
             payload_seed=seed,
+            original_input_path=mesh_path,
+            staged_input_path=staged_input_path or prepared_path,
         ),
     ]
 
@@ -442,6 +477,8 @@ def _run_blender_subprocess_stage(*, stage: ExecutionStage, context: RuntimeCont
             stage=stage,
             command=command,
             log_path=log_path,
+            run_dir=run_dir,
+            result=subprocess.CompletedProcess(command, returncode=-1, stdout="", stderr=str(exc)),
             details=str(exc),
         )
     except subprocess.TimeoutExpired as exc:
@@ -464,6 +501,13 @@ def _run_blender_subprocess_stage(*, stage: ExecutionStage, context: RuntimeCont
             stage=stage,
             command=command,
             log_path=log_path,
+            run_dir=run_dir,
+            result=subprocess.CompletedProcess(
+                command,
+                returncode=-1,
+                stdout=_subprocess_stream_text(exc.output),
+                stderr=_subprocess_stream_text(exc.stderr),
+            ),
             details=f"Timed out after {exc.timeout} seconds.",
         )
 
@@ -478,11 +522,14 @@ def _run_blender_subprocess_stage(*, stage: ExecutionStage, context: RuntimeCont
     )
 
     if result.returncode != 0:
-        raise PipelineError(
-            f"UniRig {stage.name} stage failed with exit code {result.returncode}. Command: {' '.join(command)}\n"
-            f"Expected output: {stage.success_path}\n"
-            f"Stage log: {log_path}\n"
-            f"Tail: {_tail_summary(result)}"
+        _raise_blender_stage_error(
+            error_code="stage-failed",
+            stage=stage,
+            command=command,
+            log_path=log_path,
+            run_dir=run_dir,
+            result=result,
+            details=f"Blender exited with code {result.returncode}.",
         )
 
     try:
@@ -493,6 +540,8 @@ def _run_blender_subprocess_stage(*, stage: ExecutionStage, context: RuntimeCont
             stage=stage,
             command=command,
             log_path=log_path,
+            run_dir=run_dir,
+            result=result,
             details=str(exc),
         )
     if marker_path is None:
@@ -501,6 +550,8 @@ def _run_blender_subprocess_stage(*, stage: ExecutionStage, context: RuntimeCont
             stage=stage,
             command=command,
             log_path=log_path,
+            run_dir=run_dir,
+            result=result,
         )
     if not marker_path.exists():
         _raise_blender_stage_error(
@@ -508,6 +559,9 @@ def _run_blender_subprocess_stage(*, stage: ExecutionStage, context: RuntimeCont
             stage=stage,
             command=command,
             log_path=log_path,
+            run_dir=run_dir,
+            result=result,
+            result_json=marker_path,
             details=f"Missing result file: {marker_path}",
         )
 
@@ -524,6 +578,9 @@ def _run_blender_subprocess_stage(*, stage: ExecutionStage, context: RuntimeCont
             stage=stage,
             command=command,
             log_path=log_path,
+            run_dir=run_dir,
+            result=result,
+            result_json=marker_path,
             details=str(exc),
         )
 
@@ -533,6 +590,11 @@ def _run_blender_subprocess_stage(*, stage: ExecutionStage, context: RuntimeCont
             stage=stage,
             command=command,
             log_path=log_path,
+            run_dir=run_dir,
+            result=result,
+            result_json=marker_path,
+            stdout_tail="\n".join(normalized["stdout_tail"]),
+            stderr_tail="\n".join(normalized["stderr_tail"]),
             details=normalized["message"] or normalized["error_code"] or blender_bridge.BLENDER_STAGE_STATUS_FAILED,
         )
     if not stage.success_path.exists():
@@ -541,6 +603,11 @@ def _run_blender_subprocess_stage(*, stage: ExecutionStage, context: RuntimeCont
             stage=stage,
             command=command,
             log_path=log_path,
+            run_dir=run_dir,
+            result=result,
+            result_json=marker_path,
+            stdout_tail="\n".join(normalized["stdout_tail"]),
+            stderr_tail="\n".join(normalized["stderr_tail"]),
             details=f"Expected output missing on disk: {stage.success_path}",
         )
 
@@ -551,15 +618,60 @@ def _raise_blender_stage_error(
     stage: ExecutionStage,
     command: list[str],
     log_path: Path,
+    run_dir: Path,
+    result: subprocess.CompletedProcess[str] | None = None,
+    result_json: Path | None = None,
+    stdout_tail: str | None = None,
+    stderr_tail: str | None = None,
     details: str = "",
 ) -> None:
     normalized_code = blender_bridge.validate_failure_code(error_code)
     detail_suffix = f"\nDetails: {details}" if details else ""
+    diagnostic = _build_stage_failure_diagnostic(
+        run_dir=run_dir,
+        stage=stage,
+        error_code=normalized_code,
+        log_path=log_path,
+        result=result,
+        result_json=result_json,
+        stdout_tail=stdout_tail,
+        stderr_tail=stderr_tail,
+    )
     raise PipelineError(
         f"UniRig {stage.name} stage failed ({normalized_code}). Command: {' '.join(command)}\n"
         f"Expected output: {stage.success_path}\n"
         f"Stage log: {log_path}"
-        f"{detail_suffix}"
+        f"{detail_suffix}",
+        diagnostic=diagnostic,
+    )
+
+
+def _build_stage_failure_diagnostic(
+    *,
+    run_dir: Path,
+    stage: ExecutionStage,
+    error_code: str,
+    log_path: Path | None,
+    result: subprocess.CompletedProcess[str] | None,
+    result_json: Path | None,
+    stdout_tail: str | None = None,
+    stderr_tail: str | None = None,
+) -> StageFailureDiagnostic:
+    stdout_source = stdout_tail if stdout_tail is not None else (_subprocess_stream_text(result.stdout) if result is not None else "")
+    stderr_source = stderr_tail if stderr_tail is not None else (_subprocess_stream_text(result.stderr) if result is not None else "")
+    return StageFailureDiagnostic(
+        run_id=run_dir.name,
+        stage=stage.name,
+        error_code=error_code,
+        original_input=_path_or_unavailable(stage.original_input_path),
+        staged_input=_path_or_unavailable(stage.staged_input_path),
+        runtime_input=_path_or_unavailable(stage.runtime_input_path),
+        expected_output=str(stage.success_path),
+        result_json=_path_or_unavailable(result_json),
+        stage_log=_path_or_unavailable(log_path),
+        stdout_tail=bounded_stream_tail(stdout_source),
+        stderr_tail=bounded_stream_tail(stderr_source),
+        blender_returncode=(result.returncode if result is not None else None),
     )
 
 
@@ -793,6 +905,65 @@ def _tail_summary(result: subprocess.CompletedProcess[str], max_lines: int = 12)
     return "\n".join(combined[-max_lines:])
 
 
+def bounded_stream_tail(
+    text: str | bytes | None,
+    *,
+    max_lines: int = DIAGNOSTIC_TAIL_MAX_LINES,
+    max_bytes: int = DIAGNOSTIC_TAIL_MAX_BYTES,
+) -> str:
+    sanitized = _sanitize_diagnostic_text(_subprocess_stream_text(text))
+    lines = sanitized.splitlines()
+    if not lines:
+        return NOT_CAPTURED
+    tail = "\n".join(lines[-max_lines:])
+    encoded = tail.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return tail
+    return encoded[-max_bytes:].decode("utf-8", errors="ignore")
+
+
+def _sanitize_diagnostic_text(text: str) -> str:
+    return "".join(
+        char
+        for char in str(text)
+        if char in {"\n", "\t"} or ord(char) >= 32
+    )
+
+
+def _path_or_unavailable(path: Path | str | None) -> str:
+    if path is None:
+        return UNAVAILABLE
+    value = str(path).strip()
+    return value or UNAVAILABLE
+
+
+def _diagnostic_value(value: str | int | None, *, stream: bool = False) -> str:
+    if value is None:
+        return NOT_CAPTURED if stream else UNAVAILABLE
+    text = str(value).strip()
+    if not text:
+        return NOT_CAPTURED if stream else UNAVAILABLE
+    return text
+
+
+def _format_stage_failure_diagnostic(diagnostic: StageFailureDiagnostic) -> str:
+    fields = [
+        ("run_id", _diagnostic_value(diagnostic.run_id)),
+        ("stage", _diagnostic_value(diagnostic.stage)),
+        ("error_code", _diagnostic_value(diagnostic.error_code)),
+        ("original_input", _diagnostic_value(diagnostic.original_input)),
+        ("staged_input", _diagnostic_value(diagnostic.staged_input)),
+        ("runtime_input", _diagnostic_value(diagnostic.runtime_input)),
+        ("expected_output", _diagnostic_value(diagnostic.expected_output)),
+        ("result_json", _diagnostic_value(diagnostic.result_json)),
+        ("stage_log", _diagnostic_value(diagnostic.stage_log)),
+        ("stdout_tail", _diagnostic_value(bounded_stream_tail(diagnostic.stdout_tail), stream=True)),
+        ("stderr_tail", _diagnostic_value(bounded_stream_tail(diagnostic.stderr_tail), stream=True)),
+        ("blender_returncode", _diagnostic_value(diagnostic.blender_returncode)),
+    ]
+    return "\n".join(f"{key}={value}" for key, value in fields)
+
+
 def public_error_message(exc: PipelineError) -> str:
     message = str(exc)
     cleanup_prefix = "UniRig staged-file cleanup failed"
@@ -801,6 +972,13 @@ def public_error_message(exc: PipelineError) -> str:
 
     match = re.search(r"UniRig\s+([\w-]+)\s+(stage|hook)\s+failed", message)
     if match:
+        diagnostic = getattr(exc, "diagnostic", None)
+        if isinstance(diagnostic, StageFailureDiagnostic):
+            return (
+                f"UniRig {match.group(1)} stage failed. Inspect extension runtime logs for details.\n"
+                "Diagnostics:\n"
+                f"{_format_stage_failure_diagnostic(diagnostic)}"
+            )
         return f"UniRig {match.group(1)} stage failed. Inspect extension runtime logs for details."
 
     return PIPELINE_PUBLIC_ERROR

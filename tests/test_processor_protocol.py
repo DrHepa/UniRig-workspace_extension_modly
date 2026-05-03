@@ -252,6 +252,21 @@ class ProcessorProtocolTests(unittest.TestCase):
             "    result_path.write_text('{not-json', encoding='utf-8')\n"
             "    sys.stdout.write(MARKER + str(result_path.resolve()) + '\\n')\n"
             "    raise SystemExit(0)\n"
+            "if SCENARIO == 'skeleton-shape-mismatch' and payload['stage'] == 'skeleton':\n"
+            "    result = {\n"
+            "        'protocol_version': 1,\n"
+            "        'stage': payload['stage'],\n"
+            "        'status': 'stage-failed',\n"
+            "        'produced': [],\n"
+            "        'error_code': 'expected-output-missing',\n"
+            "        'message': 'Expected Blender stage outputs were not created on disk.',\n"
+            "        'stdout_tail': ['all input arrays must have the same shape'],\n"
+            "        'stderr_tail': [],\n"
+            "    }\n"
+            "    result_path.write_text(json.dumps(result), encoding='utf-8')\n"
+            "    sys.stdout.write('all input arrays must have the same shape\\n')\n"
+            "    sys.stdout.write(MARKER + str(result_path.resolve()) + '\\n')\n"
+            "    raise SystemExit(0)\n"
             "output_path = Path(payload['input']['output'])\n"
             "output_path.parent.mkdir(parents=True, exist_ok=True)\n"
             "if payload['stage'].startswith('extract-'):\n"
@@ -898,6 +913,37 @@ class ProcessorProtocolTests(unittest.TestCase):
         self.assertTrue(result_path.exists())
         self.assertEqual(result_path.read_text(encoding="utf-8"), "{not-json")
 
+    def test_processor_transports_skeleton_stage_diagnostics_end_to_end(self) -> None:
+        trace_path = self.temp_dir / "fake-blender-skeleton-shape-mismatch.jsonl"
+        blender_path = self._make_fake_blender_executable(trace_path=trace_path, scenario="skeleton-shape-mismatch")
+        self._enable_linux_arm64_blender_seam(blender_path=blender_path)
+
+        result = self._run_processor_inprocess(
+            {"input": {"filePath": str(self.input_mesh), "nodeId": "rig-mesh"}, "params": {"seed": 111}}
+        )
+
+        self.assertNotEqual(result["exit_code"], 0)
+        self.assertFalse(any(message["type"] == "done" for message in result["messages"]))
+        self.assertEqual(result["messages"][-1]["type"], "error")
+        message = result["messages"][-1]["message"]
+        self.assertIn("UniRig skeleton stage failed", message)
+        self.assertIn("run_id=run-", message)
+        self.assertIn("stage=skeleton", message)
+        self.assertIn("error_code=expected-output-missing", message)
+        self.assertIn("original_input=", message)
+        self.assertIn("staged_input=", message)
+        self.assertIn("runtime_input=", message)
+        self.assertIn("expected_output=", message)
+        self.assertIn("skeleton_stage.fbx", message)
+        self.assertIn("result_json=", message)
+        self.assertIn("result.json", message)
+        self.assertIn("stage_log=", message)
+        self.assertIn("skeleton.log", message)
+        self.assertIn("stdout_tail=", message)
+        self.assertIn("all input arrays must have the same shape", message)
+        self.assertIn("stderr_tail=(not captured)", message)
+        self.assertIn("blender_returncode=0", message)
+
     def test_processor_keeps_windows_x86_64_blender_seam_isolated_end_to_end(self) -> None:
         windows_trace = self.temp_dir / "fake-blender-windows.jsonl"
         windows_blender = self._make_fake_blender_executable(trace_path=windows_trace, scenario="success")
@@ -1048,10 +1094,155 @@ class PipelineGuardrailTests(unittest.TestCase):
 
     def _assert_blender_stage_public_error_contract(self, exc: pipeline.PipelineError, *, stage_name: str, error_code: str) -> None:
         self.assertIn(error_code, str(exc))
-        self.assertEqual(
-            pipeline.public_error_message(exc),
-            f"UniRig {stage_name} stage failed. Inspect extension runtime logs for details.",
+        message = pipeline.public_error_message(exc)
+        self.assertTrue(message.startswith(f"UniRig {stage_name} stage failed. Inspect extension runtime logs for details."))
+        self.assertIn(f"stage={stage_name}", message)
+        self.assertIn(f"error_code={error_code}", message)
+        self.assertIn("run_id=", message)
+        self.assertIn("expected_output=", message)
+        self.assertIn("result_json=", message)
+        self.assertIn("stage_log=", message)
+        self.assertIn("stdout_tail=", message)
+        self.assertIn("stderr_tail=", message)
+        self.assertIn("blender_returncode=", message)
+
+    def test_public_error_message_formats_structured_stage_diagnostic(self) -> None:
+        diagnostic = pipeline.StageFailureDiagnostic(
+            run_id="run-synthetic",
+            stage="skeleton",
+            error_code="expected-output-missing",
+            original_input=str(self.temp_dir / "avatar.glb"),
+            staged_input=str(self.run_dir / "input.glb"),
+            runtime_input=str(self.context.unirig_dir / ".modly_stage_input_run-processor.glb"),
+            expected_output=str(self.run_dir / "skeleton_stage.fbx"),
+            result_json=str(self.run_dir / "result.json"),
+            stage_log=str(self._stage_log_path("skeleton")),
+            stdout_tail="all input arrays must have the same shape",
+            stderr_tail="(not captured)",
+            blender_returncode=0,
         )
+
+        message = pipeline.public_error_message(pipeline.PipelineError("UniRig skeleton stage failed", diagnostic=diagnostic))
+
+        self.assertTrue(message.startswith("UniRig skeleton stage failed"))
+        for expected in (
+            "run_id=run-synthetic",
+            "stage=skeleton",
+            "error_code=expected-output-missing",
+            "original_input=",
+            "staged_input=",
+            "runtime_input=",
+            "expected_output=",
+            "result_json=",
+            "stage_log=",
+            "stdout_tail=all input arrays must have the same shape",
+            "stderr_tail=(not captured)",
+            "blender_returncode=0",
+        ):
+            self.assertIn(expected, message)
+
+    def test_public_error_message_keeps_required_keys_when_diagnostic_values_are_missing(self) -> None:
+        diagnostic = pipeline.StageFailureDiagnostic(stage="skeleton", error_code="expected-output-missing")
+
+        message = pipeline.public_error_message(pipeline.PipelineError("UniRig skeleton stage failed", diagnostic=diagnostic))
+
+        for expected in (
+            "run_id=<unavailable>",
+            "stage=skeleton",
+            "error_code=expected-output-missing",
+            "original_input=<unavailable>",
+            "staged_input=<unavailable>",
+            "runtime_input=<unavailable>",
+            "expected_output=<unavailable>",
+            "result_json=<unavailable>",
+            "stage_log=<unavailable>",
+            "stdout_tail=(not captured)",
+            "stderr_tail=(not captured)",
+            "blender_returncode=<unavailable>",
+        ):
+            self.assertIn(expected, message)
+
+    def test_public_error_message_preserves_generic_fallback_without_diagnostic(self) -> None:
+        message = pipeline.public_error_message(pipeline.PipelineError("UniRig skeleton stage failed (stage-failed)."))
+
+        self.assertEqual(message, "UniRig skeleton stage failed. Inspect extension runtime logs for details.")
+
+    def test_bounded_stream_tail_strips_control_chars_and_limits_lines_and_bytes(self) -> None:
+        lines = [f"line-{index}" for index in range(45)]
+        tail = pipeline.bounded_stream_tail("\n".join(["bad\x00control", *lines]))
+        byte_limited_tail = pipeline.bounded_stream_tail("x" * 9000)
+
+        self.assertNotIn("\x00", tail)
+        self.assertLessEqual(len(tail.splitlines()), 40)
+        self.assertLessEqual(len(tail.encode("utf-8")), 8192)
+        self.assertLessEqual(len(byte_limited_tail.encode("utf-8")), 8192)
+        self.assertIn("line-44", tail)
+        self.assertNotIn("line-0", tail)
+
+    def test_run_stage_maps_skeleton_expected_output_missing_with_stdout_tail_to_diagnostic_error(self) -> None:
+        context = self._linux_arm64_blender_context()
+        prepared_path = self.run_dir / "prepared.glb"
+        prepared_path.write_bytes(b"prepared")
+        stage = pipeline.build_execution_plan(
+            mesh_path=self.temp_dir / "avatar.glb",
+            prepared_path=prepared_path,
+            run_dir=self.run_dir,
+            context=context,
+            seed=113,
+        )[1]
+        result_path = blender_bridge.result_path_for_run_dir(self.run_dir)
+
+        def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            del command, kwargs
+            result_path.write_text(
+                json.dumps(
+                    blender_bridge.build_stage_failed_result(
+                        stage="skeleton",
+                        error_code="expected-output-missing",
+                        message="Expected Blender stage outputs were not created on disk.",
+                        stdout_tail=["all input arrays must have the same shape"],
+                    )
+                ),
+                encoding="utf-8",
+            )
+            return subprocess.CompletedProcess(
+                args=["/opt/blender/blender"],
+                returncode=0,
+                stdout=f"all input arrays must have the same shape\n{blender_bridge.build_result_marker_line(result_path.resolve())}\n",
+                stderr="",
+            )
+
+        with mock.patch("unirig_ext.pipeline.subprocess.run", side_effect=fake_run):
+            with self.assertRaises(pipeline.PipelineError) as ctx:
+                pipeline._run_stage(stage, context=context, run_dir=self.run_dir)
+
+        message = pipeline.public_error_message(ctx.exception)
+        self.assertIn("stage=skeleton", message)
+        self.assertIn("error_code=expected-output-missing", message)
+        self.assertIn("expected_output=", message)
+        self.assertIn("result_json=", message)
+        self.assertIn("stage_log=", message)
+        self.assertIn("stdout_tail=all input arrays must have the same shape", message)
+        self.assertIn("blender_returncode=0", message)
+
+    def test_run_stage_diagnostic_survives_missing_marker_result_and_log_context(self) -> None:
+        context, stage, _prepared_path = self._merge_blender_stage(seed=115)
+
+        with mock.patch(
+            "unirig_ext.pipeline.subprocess.run",
+            return_value=subprocess.CompletedProcess(args=["/opt/blender/blender"], returncode=0, stdout="boot only\n", stderr=""),
+        ):
+            with self.assertRaises(pipeline.PipelineError) as ctx:
+                pipeline._run_stage(stage, context=context, run_dir=self.run_dir)
+
+        message = pipeline.public_error_message(ctx.exception)
+        self.assertIn("stage=merge", message)
+        self.assertIn("error_code=marker-missing", message)
+        self.assertIn("result_json=<unavailable>", message)
+        self.assertIn("stage_log=", message)
+        self.assertIn("stdout_tail=boot only", message)
+        self.assertIn("stderr_tail=(not captured)", message)
+        self.assertIn("blender_returncode=0", message)
 
     def test_run_command_fails_when_process_exits_nonzero_even_if_output_exists(self) -> None:
         output_path = self.temp_dir / "stage-output.bin"
