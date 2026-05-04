@@ -128,6 +128,34 @@ class HumanoidMappingCandidateReadOnlyTests(unittest.TestCase):
 
 
 class HumanoidMappingCandidateKimodoProbeTests(unittest.TestCase):
+    def test_complete_source_bvh_fixture_covers_required_kimodo_roles(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="unirig-map-complete-source-") as temp_dir:
+            source_bvh = _write_complete_source_bvh(Path(temp_dir) / "complete_source.bvh")
+
+            text = source_bvh.read_text(encoding="utf-8")
+
+            for joint_name in (
+                "Hips",
+                "Spine",
+                "Chest",
+                "Neck",
+                "Head",
+                "LeftUpperArm",
+                "LeftForeArm",
+                "LeftHand",
+                "RightUpperArm",
+                "RightForeArm",
+                "RightHand",
+                "LeftUpperLeg",
+                "LeftLowerLeg",
+                "LeftFoot",
+                "RightUpperLeg",
+                "RightLowerLeg",
+                "RightFoot",
+            ):
+                self.assertIn(f"JOINT {joint_name}", text.replace("ROOT Hips", "JOINT Hips"))
+            self.assertNotIn("/home/drhepa", str(source_bvh))
+
     def test_probe_unavailable_is_non_fatal_and_keeps_base_candidate(self) -> None:
         with tempfile.TemporaryDirectory(prefix="unirig-map-probe-unavailable-") as temp_dir:
             glb = write_resolver_ready_glb(Path(temp_dir) / "ready.glb")
@@ -158,6 +186,18 @@ class HumanoidMappingCandidateKimodoProbeTests(unittest.TestCase):
                 populated = [result.primary_failure_layer] if result.primary_failure_layer else []
                 self.assertLessEqual(len(populated), 1)
 
+    def test_missing_source_role_calibration_error_is_source_incomplete_not_mapping_incompatible(self) -> None:
+        result = classify_probe_failure(
+            "CALIBRATION_UNAVAILABLE",
+            "CALIBRATION_UNAVAILABLE: fail_closed_reasons=['missing_source_role:left_hand']",
+            diagnostics=[{"code": "retarget_calibration", "message": "missing_source_role:left_hand"}],
+        )
+
+        self.assertEqual(result.status, "rejected")
+        self.assertEqual(result.primary_failure_layer, "source_calibration_incomplete")
+        self.assertEqual(result.code, "CALIBRATION_UNAVAILABLE")
+        self.assertIn("missing_source_role:left_hand", result.message)
+
     def test_probe_acceptance_records_disposable_copy_without_source_sidecar(self) -> None:
         with tempfile.TemporaryDirectory(prefix="unirig-map-probe-accepted-") as temp_dir:
             root = Path(temp_dir)
@@ -187,7 +227,56 @@ class HumanoidMappingCandidateKimodoProbeTests(unittest.TestCase):
             self.assertEqual(probe["status"], "accepted")
             self.assertEqual(probe["primary_failure_layer"], None)
             self.assertEqual(probe["diagnostics"][0]["mapping_confidence"], "compatible")
-            self.assertEqual(probe["diagnostics"][0]["stages"], ["inspect_rig", "build_joint_mapping"])
+            self.assertEqual(probe["diagnostics"][0]["stages"], ["parse_bvh", "inspect_rig", "build_joint_mapping"])
+            self.assertFalse(glb.with_suffix(".rigmeta.json").exists())
+
+    def test_kimodo_backend_runs_calibrated_source_sequence_on_disposable_probe_copy(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="unirig-map-kimodo-calibrated-") as temp_dir:
+            root = Path(temp_dir)
+            kimodo_root = root / "kimodo"
+            calls_log = root / "probe_calls.json"
+            _write_fake_kimodo_root(kimodo_root, mode="accepted", calls_log=calls_log)
+            source_bvh = _write_complete_source_bvh(root / "complete_source.bvh")
+            probe_output_root = root / "probe-output"
+            probe_output_root.mkdir()
+            glb = write_resolver_ready_glb(root / "source.glb")
+            backend = KimodoProbeBackend(kimodo_root, source_bvh=source_bvh, probe_output_root=probe_output_root)
+
+            candidate = build_candidate_for_glb(glb, kimodo_backend=backend, probe_retarget=True)
+
+            probe = candidate["kimodo_projection"]["probe"]
+            self.assertEqual(probe["probe_status"], "accepted_with_unknown_visual_quality")
+            self.assertEqual(probe["calibration_status"], "complete")
+            self.assertEqual(probe["mapping_confidence"], "calibrated")
+            self.assertEqual(probe["chain_coverage"], {"torso": "5/5", "left_arm": "3/3", "right_arm": "3/3", "left_leg": "3/3", "right_leg": "3/3"})
+            self.assertEqual(probe["diagnostics"][0]["stages"], ["parse_bvh", "inspect_rig", "build_joint_mapping", "build_retarget_clip"])
+            self.assertEqual(probe["source_coverage"]["missing_roles"], [])
+            self.assertIn("left_hand", probe["source_coverage"]["present_roles"])
+            self.assertFalse(glb.with_suffix(".rigmeta.json").exists())
+            staged_sidecars = sorted(probe_output_root.glob("**/*.rigmeta.json"))
+            self.assertEqual(len(staged_sidecars), 1)
+            calls = json.loads(calls_log.read_text(encoding="utf-8"))
+            self.assertEqual([item["stage"] for item in calls], ["parse_bvh", "inspect_rig", "build_joint_mapping", "build_retarget_clip"])
+            self.assertEqual(Path(calls[0]["path"]).resolve(), source_bvh.resolve())
+            self.assertNotEqual(Path(calls[1]["path"]).resolve(), glb.resolve())
+
+    def test_kimodo_backend_contract_failure_from_inspect_rig_stays_contract_invalid(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="unirig-map-kimodo-contract-invalid-") as temp_dir:
+            root = Path(temp_dir)
+            kimodo_root = root / "kimodo"
+            _write_fake_kimodo_root(kimodo_root, mode="contract_invalid")
+            glb = write_resolver_ready_glb(root / "source.glb")
+
+            candidate = build_candidate_for_glb(glb, kimodo_backend=KimodoProbeBackend(kimodo_root))
+
+            probe = candidate["kimodo_projection"]["probe"]
+            self.assertEqual(probe["status"], "rejected")
+            self.assertEqual(probe["primary_failure_layer"], "contract_invalid")
+            self.assertEqual(probe["failure"]["layer"], "contract_invalid")
+            self.assertEqual(probe["code"], "INVALID_CANDIDATE")
+            self.assertIn("fake target contract failure", probe["message"])
+            self.assertEqual(probe["diagnostics"][0]["code"], "INVALID_CANDIDATE")
+            self.assertIn("fake target contract failure", probe["diagnostics"][0]["message"])
             self.assertFalse(glb.with_suffix(".rigmeta.json").exists())
 
     def test_kimodo_backend_rejection_flows_through_disposable_probe_execution(self) -> None:
@@ -232,6 +321,44 @@ class HumanoidMappingCandidateCliTests(unittest.TestCase):
             failed = self._run_cli([str(first), "--json-out", str(missing_parent)])
             self.assertEqual(failed.returncode, 2)
             self.assertIn("output parent does not exist", failed.stderr)
+
+    def test_cli_accepts_probe_source_and_output_root_and_fails_loudly_for_bad_paths(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="unirig-map-cli-probe-") as temp_dir:
+            root = Path(temp_dir)
+            glb = write_resolver_ready_glb(root / "candidate.glb")
+            kimodo_root = root / "kimodo"
+            _write_fake_kimodo_root(kimodo_root, mode="accepted")
+            source_bvh = _write_complete_source_bvh(root / "complete_source.bvh")
+            probe_output_root = root / "probe-output"
+            probe_output_root.mkdir()
+            json_out = root / "report.json"
+
+            ok = self._run_cli([
+                str(glb),
+                "--json-out",
+                str(json_out),
+                "--kimodo-root",
+                str(kimodo_root),
+                "--source-bvh",
+                str(source_bvh),
+                "--probe-output-root",
+                str(probe_output_root),
+                "--probe-retarget",
+            ])
+            self.assertEqual(ok.returncode, 0, ok.stderr)
+            probe = json.loads(json_out.read_text(encoding="utf-8"))["candidates"][0]["kimodo_projection"]["probe"]
+            self.assertEqual(probe["probe_status"], "accepted_with_unknown_visual_quality")
+            self.assertEqual(probe["calibration_status"], "complete")
+            self.assertFalse(glb.with_suffix(".rigmeta.json").exists())
+
+            bad_source = self._run_cli([str(glb), "--json-out", str(root / "bad-source.json"), "--kimodo-root", str(kimodo_root), "--source-bvh", str(root / "missing.bvh")])
+            self.assertEqual(bad_source.returncode, 2)
+            self.assertIn("source BVH path does not exist", bad_source.stderr)
+            self.assertIn("missing.bvh", bad_source.stderr)
+
+            bad_root = self._run_cli([str(glb), "--json-out", str(root / "bad-root.json"), "--kimodo-root", str(kimodo_root), "--source-bvh", str(source_bvh), "--probe-output-root", str(root / "missing-output-root")])
+            self.assertEqual(bad_root.returncode, 2)
+            self.assertIn("probe output root does not exist", bad_root.stderr)
 
     def test_core_writers_emit_sorted_json_and_jsonl_to_existing_parents(self) -> None:
         with tempfile.TemporaryDirectory(prefix="unirig-map-writers-") as temp_dir:
@@ -378,9 +505,142 @@ class AcceptedBackend:
             raise AssertionError("probe sidecar was not written beside disposable copy")
 
 
-def _write_fake_kimodo_root(root: Path, *, mode: str) -> None:
+def _write_complete_source_bvh(path: Path) -> Path:
+    path.write_text(
+        """HIERARCHY
+ROOT Hips
+{
+  OFFSET 0.0 0.0 0.0
+  CHANNELS 6 Xposition Yposition Zposition Zrotation Xrotation Yrotation
+  JOINT Spine
+  {
+    OFFSET 0.0 10.0 0.0
+    CHANNELS 3 Zrotation Xrotation Yrotation
+    JOINT Chest
+    {
+      OFFSET 0.0 10.0 0.0
+      CHANNELS 3 Zrotation Xrotation Yrotation
+      JOINT Neck
+      {
+        OFFSET 0.0 5.0 0.0
+        CHANNELS 3 Zrotation Xrotation Yrotation
+        JOINT Head
+        {
+          OFFSET 0.0 5.0 0.0
+          CHANNELS 3 Zrotation Xrotation Yrotation
+          End Site
+          {
+            OFFSET 0.0 3.0 0.0
+          }
+        }
+      }
+      JOINT LeftUpperArm
+      {
+        OFFSET -5.0 4.0 0.0
+        CHANNELS 3 Zrotation Xrotation Yrotation
+        JOINT LeftForeArm
+        {
+          OFFSET -8.0 0.0 0.0
+          CHANNELS 3 Zrotation Xrotation Yrotation
+          JOINT LeftHand
+          {
+            OFFSET -6.0 0.0 0.0
+            CHANNELS 3 Zrotation Xrotation Yrotation
+            End Site
+            {
+              OFFSET -2.0 0.0 0.0
+            }
+          }
+        }
+      }
+      JOINT RightUpperArm
+      {
+        OFFSET 5.0 4.0 0.0
+        CHANNELS 3 Zrotation Xrotation Yrotation
+        JOINT RightForeArm
+        {
+          OFFSET 8.0 0.0 0.0
+          CHANNELS 3 Zrotation Xrotation Yrotation
+          JOINT RightHand
+          {
+            OFFSET 6.0 0.0 0.0
+            CHANNELS 3 Zrotation Xrotation Yrotation
+            End Site
+            {
+              OFFSET 2.0 0.0 0.0
+            }
+          }
+        }
+      }
+    }
+  }
+  JOINT LeftUpperLeg
+  {
+    OFFSET -3.0 -8.0 0.0
+    CHANNELS 3 Zrotation Xrotation Yrotation
+    JOINT LeftLowerLeg
+    {
+      OFFSET 0.0 -10.0 0.0
+      CHANNELS 3 Zrotation Xrotation Yrotation
+      JOINT LeftFoot
+      {
+        OFFSET 0.0 -8.0 3.0
+        CHANNELS 3 Zrotation Xrotation Yrotation
+        End Site
+        {
+          OFFSET 0.0 -2.0 3.0
+        }
+      }
+    }
+  }
+  JOINT RightUpperLeg
+  {
+    OFFSET 3.0 -8.0 0.0
+    CHANNELS 3 Zrotation Xrotation Yrotation
+    JOINT RightLowerLeg
+    {
+      OFFSET 0.0 -10.0 0.0
+      CHANNELS 3 Zrotation Xrotation Yrotation
+      JOINT RightFoot
+      {
+        OFFSET 0.0 -8.0 3.0
+        CHANNELS 3 Zrotation Xrotation Yrotation
+        End Site
+        {
+          OFFSET 0.0 -2.0 3.0
+        }
+      }
+    }
+  }
+}
+MOTION
+Frames: 1
+Frame Time: 0.0333333
+0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+""",
+        encoding="utf-8",
+    )
+    return path
+
+
+def _write_fake_kimodo_root(root: Path, *, mode: str, calls_log: Path | None = None) -> None:
     (root / "tests" / "fixtures").mkdir(parents=True)
     (root / "tests" / "fixtures" / "synthetic_walk.bvh").write_text("fake bvh", encoding="utf-8")
+    calls_path = str(calls_log) if calls_log is not None else ""
+    mapping_confidence = "calibrated" if calls_log is not None else "compatible"
+    (root / "probe_calls.py").write_text(
+        f"import json\n"
+        f"from pathlib import Path\n"
+        f"CALLS_PATH = {calls_path!r}\n"
+        f"def record(stage, **payload):\n"
+        f"    if not CALLS_PATH:\n"
+        f"        return\n"
+        f"    path = Path(CALLS_PATH)\n"
+        f"    calls = json.loads(path.read_text(encoding='utf-8')) if path.exists() else []\n"
+        f"    calls.append(dict(stage=stage, **payload))\n"
+        f"    path.write_text(json.dumps(calls, sort_keys=True), encoding='utf-8')\n",
+        encoding="utf-8",
+    )
     (root / "retarget_errors.py").write_text(
         "class RetargetError(RuntimeError):\n"
         "    def __init__(self, code, message, diagnostics=None):\n"
@@ -392,37 +652,47 @@ def _write_fake_kimodo_root(root: Path, *, mode: str) -> None:
         encoding="utf-8",
     )
     (root / "kimodo_bvh.py").write_text(
+        "from probe_calls import record\n"
         "class Motion:\n"
-        "    joints = {'Hips': object(), 'Spine': object(), 'Head': object()}\n"
+        "    joints = {'Hips': object(), 'Spine': object(), 'Chest': object(), 'Neck': object(), 'Head': object(), 'LeftUpperArm': object(), 'LeftForeArm': object(), 'LeftHand': object(), 'RightUpperArm': object(), 'RightForeArm': object(), 'RightHand': object(), 'LeftUpperLeg': object(), 'LeftLowerLeg': object(), 'LeftFoot': object(), 'RightUpperLeg': object(), 'RightLowerLeg': object(), 'RightFoot': object()}\n"
         "def parse_bvh(path):\n"
+        "    record('parse_bvh', path=str(path))\n"
         "    return Motion()\n",
         encoding="utf-8",
     )
     (root / "rig_inspector.py").write_text(
         "import json\n"
+        "from probe_calls import record\n"
         "class Rig:\n"
-        "    joint_names = ('hips', 'spine', 'head')\n"
+        "    joint_names = ('hips', 'spine', 'chest', 'neck', 'head', 'left_upper_arm', 'left_lower_arm', 'left_hand', 'right_upper_arm', 'right_lower_arm', 'right_hand', 'left_upper_leg', 'left_lower_leg', 'left_foot', 'right_upper_leg', 'right_lower_leg', 'right_foot')\n"
         "    humanoid_diagnostics = ('humanoid_contract_validated',)\n"
         "def inspect_rig(path, source_kind='unknown_mesh_source'):\n"
+        "    record('inspect_rig', path=str(path), source_kind=source_kind)\n"
         "    sidecar = path.with_suffix('.rigmeta.json')\n"
         "    payload = json.loads(sidecar.read_text(encoding='utf-8'))\n"
         "    if payload.get('humanoid_contract', {}).get('schema') != 'modly.humanoid.v1':\n"
         "        raise RuntimeError('contract was not staged beside disposable copy')\n"
-        "    return Rig()\n",
+        + ("    raise RuntimeError('INVALID_CANDIDATE: fake target contract failure from inspect_rig')\n" if mode == "contract_invalid" else "")
+        + "    return Rig()\n",
         encoding="utf-8",
     )
     build_mapping = (
         "from retarget_errors import RetargetError, MAPPING_INCOMPATIBLE\n"
         "class Mapping:\n"
-        "    confidence = 'compatible'\n"
+        f"    confidence = {mapping_confidence!r}\n"
         "    warnings = ('fake_mapping',)\n"
         "    pairs = {'Hips': 'hips'}\n"
+        "    coverage = {'torso': '5/5', 'left_arm': '3/3', 'right_arm': '3/3', 'left_leg': '3/3', 'right_leg': '3/3'}\n"
+        "class Clip:\n"
+        "    calibration = {'chain_coverage': {'torso': '5/5', 'left_arm': '3/3', 'right_arm': '3/3', 'left_leg': '3/3', 'right_leg': '3/3'}, 'version': 'kimodo.retarget_calibration.v1'}\n"
+        "    channel_count = 18\n"
         "def build_joint_mapping(source, target):\n"
     )
     if mode == "mapping_incompatible":
         build_mapping += "    raise RetargetError(MAPPING_INCOMPATIBLE, 'fake incompatible mapping')\n"
     else:
-        build_mapping += "    return Mapping()\n"
+        build_mapping += "    from probe_calls import record\n    record('build_joint_mapping')\n    return Mapping()\n"
+    build_mapping += "def build_retarget_clip(source, target):\n    from probe_calls import record\n    record('build_retarget_clip')\n    return Clip()\n"
     (root / "retargeting.py").write_text(build_mapping, encoding="utf-8")
 
 

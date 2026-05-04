@@ -313,17 +313,25 @@ def _run_probe(glb_path: Path, candidate: dict[str, Any], backend: Any, *, probe
         if hasattr(backend, "unavailable_result"):
             return probe_result_to_dict(backend.unavailable_result())
         return probe_result_to_dict(unavailable_probe_result())
+    probe_root = getattr(backend, "probe_output_root", None)
+    if probe_root is not None:
+        temp_dir = tempfile.mkdtemp(prefix="unirig-map-candidates-", dir=Path(probe_root))
+        return _run_probe_in_directory(glb_path, candidate, backend, probe_retarget=probe_retarget, temp_dir=Path(temp_dir))
     with tempfile.TemporaryDirectory(prefix="unirig-map-candidates-") as temp_dir:
-        copied = Path(temp_dir) / glb_path.name
-        shutil.copy2(glb_path, copied)
-        sidecar_payload = _sidecar_payload(candidate)
-        sidecar_path = copied.with_suffix(".rigmeta.json")
-        sidecar_path.write_text(json.dumps(sidecar_payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        try:
-            result = backend.probe(copied, sidecar_payload, probe_retarget=probe_retarget)
-        except Exception as exc:
-            return probe_result_to_dict(ProbeResult(status="rejected", primary_failure_layer="ambiguous", code="probe_exception", message=str(exc), diagnostics=[_diagnostic_from_exception("probe_exception", exc)]))
-        return probe_result_to_dict(result)
+        return _run_probe_in_directory(glb_path, candidate, backend, probe_retarget=probe_retarget, temp_dir=Path(temp_dir))
+
+
+def _run_probe_in_directory(glb_path: Path, candidate: dict[str, Any], backend: Any, *, probe_retarget: bool, temp_dir: Path) -> dict[str, Any]:
+    copied = Path(temp_dir) / glb_path.name
+    shutil.copy2(glb_path, copied)
+    sidecar_payload = _sidecar_payload(candidate)
+    sidecar_path = copied.with_suffix(".rigmeta.json")
+    sidecar_path.write_text(json.dumps(sidecar_payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    try:
+        result = backend.probe(copied, sidecar_payload, probe_retarget=probe_retarget)
+    except Exception as exc:
+        return probe_result_to_dict(ProbeResult(status="rejected", primary_failure_layer="ambiguous", code="probe_exception", message=str(exc), diagnostics=[_diagnostic_from_exception("probe_exception", exc)]))
+    return probe_result_to_dict(result)
 
 
 def _sidecar_payload(candidate: dict[str, Any]) -> dict[str, Any]:

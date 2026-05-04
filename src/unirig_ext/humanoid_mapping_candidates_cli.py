@@ -10,7 +10,7 @@ from .humanoid_mapping_candidates import (
     write_candidates_json,
     write_candidates_jsonl,
 )
-from .kimodo_probe import KimodoProbeBackend
+from .kimodo_probe import KimodoProbeBackend, KimodoProbeConfigError
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -23,7 +23,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--json-out", required=True, help="Output JSON report path. Parent directory must already exist.")
     parser.add_argument("--jsonl-out", help="Optional JSONL path with one candidate object per line. Parent directory must already exist.")
     parser.add_argument("--kimodo-root", help="Optional Kimodo checkout hint. Missing/unavailable Kimodo is non-fatal.")
+    parser.add_argument("--source-bvh", help="Optional complete source BVH for calibrated Kimodo candidate probing.")
     parser.add_argument("--probe-retarget", action="store_true", help="Ask the optional Kimodo backend to run retarget checks on disposable copies only.")
+    parser.add_argument("--probe-output-root", help="Optional existing directory for disposable Kimodo probe copies and sidecars.")
     return parser
 
 
@@ -31,7 +33,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
-        backend = KimodoProbeBackend(args.kimodo_root) if args.kimodo_root or args.probe_retarget else None
+        backend = KimodoProbeBackend(args.kimodo_root, source_bvh=args.source_bvh, probe_output_root=args.probe_output_root) if args.kimodo_root or args.probe_retarget or args.source_bvh or args.probe_output_root else None
         report = build_candidate_reports(
             args.inputs,
             manifest=args.manifest,
@@ -50,7 +52,7 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
         return 0
-    except (CandidateInputError, CandidateOutputError) as exc:
+    except (CandidateInputError, CandidateOutputError, KimodoProbeConfigError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     except Exception as exc:
