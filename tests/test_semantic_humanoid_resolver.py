@@ -163,6 +163,24 @@ def shoulderless_semantic_payload(*, prefix: str = "joint") -> dict:
     return {"asset": {"version": "2.0"}, "nodes": nodes, "skins": [{"joints": list(range(len(nodes))), "inverseBindMatrices": 0}]}
 
 
+def near_center_arm_branch_payload(*, prefix: str = "joint") -> dict:
+    payload = minimal_semantic_payload(prefix=prefix)
+    replacements = {
+        f"{prefix}_left_shoulder": [-0.02, 0.05, 0.0],
+        f"{prefix}_left_upper_arm": [-0.18, -0.08, 0.0],
+        f"{prefix}_left_lower_arm": [-0.17, -0.08, 0.0],
+        f"{prefix}_left_hand": [0.0, -0.06, 0.0],
+        f"{prefix}_right_shoulder": [0.02, 0.05, 0.0],
+        f"{prefix}_right_upper_arm": [0.18, -0.08, 0.0],
+        f"{prefix}_right_lower_arm": [0.17, -0.08, 0.0],
+        f"{prefix}_right_hand": [0.0, -0.06, 0.0],
+    }
+    for node in payload["nodes"]:
+        if node["name"] in replacements:
+            node["translation"] = replacements[node["name"]]
+    return payload
+
+
 def short_trunk_output_payload(*, prefix: str = "out") -> dict:
     names = [
         "hips",
@@ -526,6 +544,55 @@ class SemanticHumanoidResolverTests(unittest.TestCase):
         self.assertEqual(declared["roles"]["right_lower_arm"], "anon_right_lower_arm")
         self.assertEqual(declared["roles"]["right_hand"], "anon_right_hand")
 
+    def test_near_center_arm_roots_resolve_from_mirrored_branch_centers(self) -> None:
+        payload = renamed_payload(near_center_arm_branch_payload(prefix="source"), prefix="anon")
+        graph = extract_joint_graph(payload)
+        root_separation = abs(graph.nodes["anon_06"].rest_world[0][3] - graph.nodes["anon_10"].rest_world[0][3])
+        self.assertLess(root_separation, 0.05)
+
+        declared = resolve_humanoid(payload)
+
+        self.assertEqual(declared["roles"]["left_upper_arm"], "anon_07")
+        self.assertEqual(declared["roles"]["left_lower_arm"], "anon_08")
+        self.assertEqual(declared["roles"]["left_hand"], "anon_09")
+        self.assertEqual(declared["roles"]["right_upper_arm"], "anon_11")
+        self.assertEqual(declared["roles"]["right_lower_arm"], "anon_12")
+        self.assertEqual(declared["roles"]["right_hand"], "anon_13")
+
+    def test_near_center_arm_roots_with_same_side_branch_centers_fail_closed(self) -> None:
+        payload = near_center_arm_branch_payload(prefix="anon")
+        replacements = {
+            "anon_left_upper_arm": [0.18, -0.08, 0.0],
+            "anon_left_lower_arm": [0.17, -0.08, 0.0],
+            "anon_right_upper_arm": [0.28, -0.08, 0.0],
+            "anon_right_lower_arm": [0.17, -0.08, 0.0],
+        }
+        for node in payload["nodes"]:
+            if node["name"] in replacements:
+                node["translation"] = replacements[node["name"]]
+
+        with self.assertRaisesRegex(SemanticHumanoidResolutionError, "semantic_chest_missing") as raised:
+            resolve_humanoid(payload)
+
+        self.assertIn("symmetric arm evidence", raised.exception.diagnostics[0]["message"])
+
+    def test_near_center_arm_roots_without_branch_center_separation_fail_closed(self) -> None:
+        payload = near_center_arm_branch_payload(prefix="anon")
+        replacements = {
+            "anon_left_upper_arm": [-0.01, -0.08, 0.0],
+            "anon_left_lower_arm": [0.01, -0.08, 0.0],
+            "anon_right_upper_arm": [0.01, -0.08, 0.0],
+            "anon_right_lower_arm": [-0.01, -0.08, 0.0],
+        }
+        for node in payload["nodes"]:
+            if node["name"] in replacements:
+                node["translation"] = replacements[node["name"]]
+
+        with self.assertRaisesRegex(SemanticHumanoidResolutionError, "semantic_chest_missing") as raised:
+            resolve_humanoid(payload)
+
+        self.assertIn("symmetric arm evidence", raised.exception.diagnostics[0]["message"])
+
     def test_long_trunk_chest_selection_prefers_lower_balanced_arm_evidence_over_head_side_competitor(self) -> None:
         declared = resolve_humanoid(long_trunk_competing_chest_payload(prefix="anon"))
 
@@ -763,10 +830,13 @@ class SemanticHumanoidResolverTests(unittest.TestCase):
             if node["name"] in {"joint_left_upper_leg", "joint_right_upper_leg", "joint_left_shoulder", "joint_right_shoulder"}:
                 node["translation"][0] = 0.0
 
-        with self.assertRaisesRegex(SemanticHumanoidResolutionError, "semantic_symmetry_ambiguous") as raised:
+        with self.assertRaisesRegex(SemanticHumanoidResolutionError, "semantic_.*symmetry_ambiguous") as raised:
             resolve_humanoid(payload)
 
-        self.assertIn("semantic_symmetry_ambiguous", raised.exception.diagnostics[0]["code"])
+        self.assertIn(
+            raised.exception.diagnostics[0]["code"],
+            {"semantic_symmetry_ambiguous", "semantic_leg_symmetry_ambiguous"},
+        )
 
     def test_disconnected_or_malformed_skin_fails_closed_before_contract_emission(self) -> None:
         with self.assertRaisesRegex(SemanticHumanoidResolutionError, "semantic_skin_missing"):

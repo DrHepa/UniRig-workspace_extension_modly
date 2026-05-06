@@ -174,15 +174,14 @@ def resolve_humanoid(
             highest_path_length=len(trunk_path),
             minimum_trunk_length=MINIMUM_TRUNK_LENGTH,
         )
-    chest_index = _find_chest_index(graph, trunk_path)
+    chest_score = _find_chest_candidate_score(graph, trunk_path)
+    chest_index = chest_score.index if chest_score is not None else None
     if chest_index is None or chest_index < 2 or chest_index + 2 >= len(trunk_path):
         _fail("semantic_chest_missing", "Unable to identify a chest branch with symmetric arm evidence.")
     roles.update({"spine": trunk_path[1], "chest": trunk_path[chest_index], "neck": trunk_path[-2], "head": trunk_path[-1]})
     confidence.update({role: 0.9 for role in ("spine", "chest", "neck", "head")})
 
-    chest = roles["chest"]
-    arm_roots = _arm_roots_for_chest_candidate(graph, trunk_path, chest_index)
-    left_arm_root, right_arm_root = _symmetric_pair(graph, arm_roots, label="arms")
+    left_arm_root, right_arm_root = chest_score.pair
     _assign_arm_roles(graph, roles, confidence, warnings, "left", left_arm_root)
     _assign_arm_roles(graph, roles, confidence, warnings, "right", right_arm_root)
 
@@ -291,6 +290,11 @@ def _resolve_single_root(graph: JointGraph) -> str:
 
 
 def _find_chest_index(graph: JointGraph, trunk_path: list[str]) -> int | None:
+    score = _find_chest_candidate_score(graph, trunk_path)
+    return score.index if score is not None else None
+
+
+def _find_chest_candidate_score(graph: JointGraph, trunk_path: list[str]) -> ChestCandidateScore | None:
     candidates: list[ChestCandidateScore] = []
     for index in range(2, len(trunk_path) - 2):
         score = _best_chest_score_for_candidate(graph, trunk_path, index)
@@ -301,7 +305,7 @@ def _find_chest_index(graph: JointGraph, trunk_path: list[str]) -> int | None:
     candidates.sort(key=_chest_score_sort_key, reverse=True)
     if len(candidates) > 1 and _chest_scores_too_close(candidates[0], candidates[1]):
         return None
-    return candidates[0].index
+    return candidates[0]
 
 
 def _arm_roots_for_chest_candidate(graph: JointGraph, trunk_path: list[str], index: int) -> list[str]:
