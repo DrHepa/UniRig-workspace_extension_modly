@@ -415,6 +415,7 @@ class MetadataTests(unittest.TestCase):
         )
         payload = json.loads(destination.read_text(encoding="utf-8"))
         recorded_hash = payload.pop("sidecar_payload_sha256")
+        payload["humanoid_contract"]["hashes"]["sidecar_payload_sha256"] = "pending_sidecar_payload"
         canonical = json.dumps(payload, indent=2, sort_keys=True).encode("utf-8")
 
         self.assertEqual(recorded_hash, hashlib.sha256(canonical).hexdigest())

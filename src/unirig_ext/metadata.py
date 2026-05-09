@@ -49,6 +49,7 @@ def build_sidecar(
     if mode != "legacy":
         _apply_humanoid_metadata(
             payload,
+            context=context,
             mode=mode,
             output_path=output_path,
             input_path=input_path,
@@ -57,6 +58,11 @@ def build_sidecar(
             humanoid_source=humanoid_source,
         )
     payload["sidecar_payload_sha256"] = _payload_hash_without_self_reference(payload)
+    contract = payload.get("humanoid_contract")
+    if isinstance(contract, dict):
+        hashes = contract.get("hashes")
+        if isinstance(hashes, dict):
+            hashes["sidecar_payload_sha256"] = payload["sidecar_payload_sha256"]
     return payload
 
 
@@ -94,6 +100,7 @@ def _read_optional_humanoid_source(output_path: Path) -> dict[str, Any] | None:
 def _apply_humanoid_metadata(
     payload: dict,
     *,
+    context: RuntimeContext,
     mode: MetadataMode,
     output_path: Path,
     input_path: Path,
@@ -111,6 +118,11 @@ def _apply_humanoid_metadata(
             resolved.payload,
             source_hash=source_sha256,
             output_hash=output_sha256,
+            producer={
+                "extension_id": context.extension_id,
+                "node_id": "rig-mesh",
+                "version": context.source_ref,
+            },
         )
     except (HumanoidResolutionFailure, HumanoidContractError, ValueError) as exc:
         if mode == "humanoid":
@@ -138,6 +150,11 @@ def _apply_humanoid_metadata(
         diagnostic = _extract_unsafe_diagnostic(exc)
         if diagnostic is not None:
             payload["humanoid_provenance"]["diagnostic"] = diagnostic
+            payload["humanoid_provenance"]["unsafe_flags"] = [
+                str(reason.get("code"))
+                for reason in diagnostic.get("reasons", [])
+                if isinstance(reason, dict) and reason.get("code")
+            ]
         payload["humanoid_warnings"] = [
             {
                 "code": "humanoid_metadata_unavailable",
@@ -145,9 +162,15 @@ def _apply_humanoid_metadata(
                 "severity": "warning",
             }
         ]
+        payload["humanoid_contract_status"] = "contract_missing_or_untrusted"
+        payload["trusted_stabilization_status"] = "ineligible"
+        payload["runtime_status"] = "success_capable"
         return
 
     payload["humanoid_contract"] = contract
+    payload["humanoid_contract_status"] = "trusted"
+    payload["trusted_stabilization_status"] = "eligible"
+    payload["runtime_status"] = "success_capable"
     payload["humanoid_source_kind"] = resolved.kind
     payload["humanoid_provenance"] = dict(resolved.provenance)
     payload["humanoid_warnings"] = sorted(

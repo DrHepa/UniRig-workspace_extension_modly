@@ -7,7 +7,9 @@ from typing import Any
 
 
 HUMANOID_SCHEMA = "modly.humanoid.v1"
+HUMANOID_CONTRACT_VERSION = 1
 MINIMUM_CONFIDENCE = 0.75
+VALIDATOR_ID = "unirig_ext.humanoid_contract.validate_humanoid_contract"
 
 REQUIRED_ROLES = (
     "hips",
@@ -85,7 +87,13 @@ def build_humanoid_contract(output_path: Path, *, source_hash: str) -> dict:
     return build_contract_from_declared_data(declared, source_hash=source_hash, output_hash=_sha256_file(Path(output_path)))
 
 
-def build_contract_from_declared_data(declared: dict[str, Any], *, source_hash: str, output_hash: str) -> dict:
+def build_contract_from_declared_data(
+    declared: dict[str, Any],
+    *,
+    source_hash: str,
+    output_hash: str,
+    producer: dict[str, Any] | None = None,
+) -> dict:
     roles = _require_mapping(declared, "roles")
     raw_nodes = _require_list(declared, "nodes")
     nodes = _build_nodes(raw_nodes)
@@ -114,6 +122,8 @@ def build_contract_from_declared_data(declared: dict[str, Any], *, source_hash: 
 
     contract = {
         "schema": HUMANOID_SCHEMA,
+        "contract_version": HUMANOID_CONTRACT_VERSION,
+        "producer": _build_producer(producer),
         "required_roles": required_roles,
         "optional_roles": optional_roles,
         "chains": chains,
@@ -125,9 +135,11 @@ def build_contract_from_declared_data(declared: dict[str, Any], *, source_hash: 
         "hashes": {
             "source_sha256": _validate_hash(source_hash, "source_hash"),
             "output_sha256": _validate_hash(output_hash, "output_hash"),
+            "sidecar_payload_sha256": "pending_sidecar_payload",
             "glb_extras": "deferred",
         },
     }
+    contract["validation"] = _build_validation(contract["warnings"])
     validate_humanoid_contract(contract)
     return contract
 
@@ -135,6 +147,24 @@ def build_contract_from_declared_data(declared: dict[str, Any], *, source_hash: 
 def validate_humanoid_contract(contract: dict) -> None:
     if contract.get("schema") != HUMANOID_SCHEMA:
         raise HumanoidContractError(f"Unsupported humanoid contract schema: {contract.get('schema')!r}.")
+    if contract.get("contract_version") != HUMANOID_CONTRACT_VERSION:
+        raise HumanoidContractError(f"Unsupported humanoid contract version: {contract.get('contract_version')!r}.")
+    producer = contract.get("producer")
+    if not isinstance(producer, dict):
+        raise HumanoidContractError("Humanoid contract must include producer metadata.")
+    for key in ("extension_id", "node_id", "version"):
+        if not isinstance(producer.get(key), str) or not producer[key].strip():
+            raise HumanoidContractError(f"Humanoid contract producer.{key} must be a non-empty string.")
+    validation = contract.get("validation")
+    if not isinstance(validation, dict):
+        raise HumanoidContractError("Humanoid contract must include validation metadata.")
+    if validation.get("status") != "validated":
+        raise HumanoidContractError("Humanoid contract validation.status must be 'validated'.")
+    if validation.get("validator") != VALIDATOR_ID:
+        raise HumanoidContractError("Humanoid contract validation.validator is unsupported.")
+    unsafe_flags = validation.get("unsafe_flags")
+    if not isinstance(unsafe_flags, list) or any(not isinstance(flag, str) for flag in unsafe_flags):
+        raise HumanoidContractError("Humanoid contract validation.unsafe_flags must be a list of strings.")
 
     nodes = contract.get("nodes")
     if not isinstance(nodes, dict) or not nodes:
@@ -198,6 +228,15 @@ def validate_humanoid_contract(contract: dict) -> None:
             raise HumanoidContractError(
                 f"Required humanoid role '{role}' confidence {value!r} is below minimum {MINIMUM_CONFIDENCE}."
             )
+
+    hashes = contract.get("hashes")
+    if not isinstance(hashes, dict):
+        raise HumanoidContractError("Humanoid contract must include hashes mapping.")
+    _validate_hash(str(hashes.get("source_sha256", "")), "source_sha256")
+    _validate_hash(str(hashes.get("output_sha256", "")), "output_sha256")
+    sidecar_hash = hashes.get("sidecar_payload_sha256")
+    if sidecar_hash != "pending_sidecar_payload":
+        _validate_hash(str(sidecar_hash or ""), "sidecar_payload_sha256")
 
 
 def _build_nodes(raw_nodes: list[Any]) -> dict[str, dict]:
@@ -350,6 +389,24 @@ def _build_provenance(raw_provenance: Any) -> dict:
     return {
         "source": str(source.get("source") or "declared-metadata"),
         "method": str(source.get("method") or "explicit"),
+    }
+
+
+def _build_producer(raw_producer: dict[str, Any] | None) -> dict:
+    source = raw_producer if isinstance(raw_producer, dict) else {}
+    return {
+        "extension_id": str(source.get("extension_id") or "unirig-process-extension"),
+        "node_id": str(source.get("node_id") or "rig-mesh"),
+        "version": str(source.get("version") or "unknown"),
+    }
+
+
+def _build_validation(warnings: list[dict]) -> dict:
+    return {
+        "status": "validated",
+        "validator": VALIDATOR_ID,
+        "warnings": list(warnings),
+        "unsafe_flags": [],
     }
 
 
