@@ -8,6 +8,7 @@ from typing import Any
 from .bootstrap import RuntimeContext
 from .io import sha256_file
 from .humanoid_contract import HumanoidContractError, build_contract_from_declared_data
+from .humanoid_mapping_candidates import CandidateInputError, build_candidate_for_glb, build_semantic_candidates_sidecar
 from .humanoid_source import HumanoidResolutionFailure, probe_humanoid_evidence, resolve_explicit_humanoid_source, resolve_humanoid_source
 from .metadata_mode import MetadataMode, normalize_metadata_mode
 
@@ -155,6 +156,7 @@ def _apply_humanoid_metadata(
                 for reason in diagnostic.get("reasons", [])
                 if isinstance(reason, dict) and reason.get("code")
             ]
+        _attach_semantic_candidates(payload, output_path=output_path)
         payload["humanoid_warnings"] = [
             {
                 "code": "humanoid_metadata_unavailable",
@@ -187,6 +189,30 @@ def _extract_unsafe_diagnostic(exc: BaseException) -> dict[str, Any] | None:
     if isinstance(parsed, dict) and parsed.get("code") == "unsafe_for_humanoid_retarget":
         return parsed
     return None
+
+
+def _attach_semantic_candidates(payload: dict, *, output_path: Path) -> None:
+    unsafe_flags = payload.get("humanoid_provenance", {}).get("unsafe_flags", [])
+    try:
+        candidate = build_candidate_for_glb(output_path, source="metadata_mode=auto")
+    except CandidateInputError as exc:
+        payload["semantic_candidates"] = {
+            "schema": "unirig.semantic_candidates.v1",
+            "trust": {
+                "trusted": False,
+                "stabilization_eligible": False,
+                "reason": "contract_missing_or_untrusted",
+            },
+            "status": "blocked",
+            "roles": {},
+            "chains": {},
+            "rejected_candidates": [],
+            "topology": {"joint_count": 0, "root_count": 0, "max_depth": 0, "branch_points": [], "leaf_count": 0},
+            "transforms": {"status": "unavailable", "matrix_order": "row-major", "basis": {"up": "Y", "forward": "Z", "status": "unavailable"}, "nodes": {}},
+            "diagnostics": [{"code": "semantic_candidate_evidence_unavailable", "message": str(exc)}],
+        }
+        return
+    payload["semantic_candidates"] = build_semantic_candidates_sidecar(candidate, unsafe_flags=unsafe_flags)
 
 
 def _output_contract_diagnostic_if_available(

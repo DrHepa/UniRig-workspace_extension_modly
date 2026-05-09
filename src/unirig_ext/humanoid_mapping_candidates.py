@@ -17,8 +17,11 @@ from .semantic_humanoid_resolver import SemanticHumanoidResolutionError, extract
 
 
 CANDIDATE_SCHEMA = "unirig.bone_humanoid_mapping_candidate.v1"
+SEMANTIC_CANDIDATES_SCHEMA = "unirig.semantic_candidates.v1"
 KIMODO_CONTRACT_SCHEMA = "modly.humanoid.v1"
 REAL_CORPUS_ENV_VAR = "UNIRIG_HUMANOID_MAPPING_REAL_EXPORTS"
+SEMANTIC_CORE_ROLES = ("hips", "spine", "head")
+SEMANTIC_REJECTED_LIMIT = 5
 FULL_TOPOLOGY_SUFFICIENT_ASSETS = [
     "export-1777624346995.glb",
     "export-1777624347439.glb",
@@ -284,8 +287,159 @@ def build_candidate_for_glb(
     return candidate
 
 
+def build_semantic_candidates_sidecar(candidate: dict[str, Any], *, unsafe_flags: Iterable[str] = ()) -> dict[str, Any]:
+    """Return compact, untrusted sidecar candidates for best-effort mapping only."""
+    roles = candidate.get("roles") if isinstance(candidate.get("roles"), dict) else {}
+    topology = candidate.get("topology") if isinstance(candidate.get("topology"), dict) else {}
+    transforms = candidate.get("transforms") if isinstance(candidate.get("transforms"), dict) else {}
+    transform_nodes = transforms.get("nodes") if isinstance(transforms.get("nodes"), dict) else {}
+    unsafe = sorted({str(flag) for flag in unsafe_flags if str(flag)})
+
+    accepted_roles: dict[str, dict[str, Any]] = {}
+    for role, role_payload in sorted(roles.items()):
+        if not isinstance(role_payload, dict):
+            continue
+        bone = role_payload.get("bone")
+        if not isinstance(bone, str) or not bone:
+            continue
+        node_payload = transform_nodes.get(bone) if isinstance(transform_nodes.get(bone), dict) else {}
+        accepted_roles[str(role)] = {
+            "role": str(role),
+            "node_id": bone,
+            "node_name": bone,
+            "node_index": int(node_payload.get("index", 0)),
+            "confidence": round(float(role_payload.get("confidence", 0.0)), 3),
+            "reasons": _semantic_role_reasons(role_payload),
+            "source": "semantic_humanoid_resolver",
+            "unsafe_flags": [],
+            "rejected": False,
+        }
+
+    missing_core = sorted(role for role in SEMANTIC_CORE_ROLES if role not in accepted_roles)
+    diagnostics = _semantic_candidate_diagnostics(candidate, missing_core=missing_core, topology=topology)
+    status = "candidate" if not missing_core else "blocked"
+
+    return {
+        "schema": SEMANTIC_CANDIDATES_SCHEMA,
+        "producer": {"source_schema": CANDIDATE_SCHEMA, "resolver": "semantic_humanoid_resolver"},
+        "trust": {
+            "trusted": False,
+            "stabilization_eligible": False,
+            "reason": "contract_missing_or_untrusted",
+        },
+        "status": status,
+        "roles": accepted_roles,
+        "chains": _semantic_candidate_chains(accepted_roles),
+        "rejected_candidates": _semantic_rejected_candidates(roles, unsafe_flags=unsafe),
+        "topology": _semantic_topology(topology),
+        "transforms": _semantic_transforms(transforms, accepted_roles),
+        "diagnostics": diagnostics,
+    }
+
+
 def dumps_candidate_json(candidate: dict[str, Any]) -> str:
     return json.dumps(candidate, ensure_ascii=False, indent=2, sort_keys=True, separators=(",", ": ")) + "\n"
+
+
+def _semantic_role_reasons(role_payload: dict[str, Any]) -> list[str]:
+    evidence = role_payload.get("evidence") if isinstance(role_payload.get("evidence"), list) else []
+    reasons = [str(item) for item in evidence if item]
+    return sorted(set(reasons)) or ["semantic_candidate"]
+
+
+def _semantic_candidate_chains(accepted_roles: dict[str, dict[str, Any]]) -> dict[str, list[str]]:
+    chains: dict[str, list[str]] = {}
+    for chain_name, chain_roles in REQUIRED_CHAINS.items():
+        present = [role for role in chain_roles if role in accepted_roles]
+        if present:
+            chains[str(chain_name)] = present
+            if chain_name == "spine":
+                chains["torso"] = present
+    return dict(sorted(chains.items()))
+
+
+def _semantic_rejected_candidates(roles: dict[str, Any], *, unsafe_flags: list[str]) -> list[dict[str, Any]]:
+    rejected: list[dict[str, Any]] = []
+    for role, role_payload in sorted(roles.items()):
+        if not isinstance(role_payload, dict):
+            continue
+        bone = role_payload.get("bone")
+        fail_reasons = role_payload.get("fail_reasons") if isinstance(role_payload.get("fail_reasons"), list) else []
+        if bone and not unsafe_flags and not fail_reasons:
+            continue
+        rejected.append(
+            {
+                "role": str(role),
+                "node_id": str(bone) if bone else None,
+                "confidence": round(float(role_payload.get("confidence", 0.0)), 3),
+                "reasons": sorted({str(item) for item in fail_reasons if item}) or (["unsafe_context"] if unsafe_flags and bone else ["semantic_candidate_unavailable"]),
+                "unsafe_flags": list(unsafe_flags) if bone else [],
+                "rejected": True,
+            }
+        )
+    return sorted(rejected, key=lambda item: (0 if item.get("unsafe_flags") else 1, str(item.get("role", ""))))[:SEMANTIC_REJECTED_LIMIT]
+
+
+def _semantic_topology(topology: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "joint_count": int(topology.get("joint_count") or 0),
+        "root_count": int(topology.get("root_count") or 0),
+        "max_depth": int(topology.get("max_depth") or 0),
+        "branch_points": list(topology.get("branch_points") or [])[:SEMANTIC_REJECTED_LIMIT],
+        "leaf_count": int(topology.get("leaf_count") or 0),
+    }
+
+
+def _semantic_transforms(transforms: dict[str, Any], accepted_roles: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    transform_nodes = transforms.get("nodes") if isinstance(transforms.get("nodes"), dict) else {}
+    nodes: dict[str, dict[str, Any]] = {}
+    for role_payload in accepted_roles.values():
+        node_id = role_payload.get("node_id")
+        if not isinstance(node_id, str):
+            continue
+        source = transform_nodes.get(node_id) if isinstance(transform_nodes.get(node_id), dict) else {}
+        local = source.get("rest_local") if isinstance(source.get("rest_local"), list) else []
+        translation = _matrix_translation(local)
+        nodes[node_id] = {
+            "index": int(source.get("index", role_payload.get("node_index", 0))),
+            "parent": source.get("parent"),
+            "rest_local_translation": translation,
+        }
+    return {
+        "status": transforms.get("status", "available"),
+        "matrix_order": transforms.get("matrix_order", "row-major"),
+        "basis": dict(transforms.get("basis")) if isinstance(transforms.get("basis"), dict) else {"up": "Y", "forward": "Z", "status": "inferred"},
+        "nodes": dict(sorted(nodes.items())),
+    }
+
+
+def _matrix_translation(matrix: Any) -> list[float]:
+    if isinstance(matrix, list) and len(matrix) >= 3:
+        values: list[float] = []
+        for row in matrix[:3]:
+            if isinstance(row, list) and len(row) >= 4:
+                values.append(round(float(row[3]), 6))
+            else:
+                values.append(0.0)
+        return values
+    return [0.0, 0.0, 0.0]
+
+
+def _semantic_candidate_diagnostics(candidate: dict[str, Any], *, missing_core: list[str], topology: dict[str, Any]) -> list[dict[str, Any]]:
+    diagnostics = [dict(item) for item in candidate.get("diagnostics", []) if isinstance(item, dict)]
+    if missing_core:
+        reasons = ["missing_core_roles"]
+        if int(topology.get("joint_count") or 0) < 8:
+            reasons.append("too_few_joints")
+        diagnostics.append(
+            {
+                "code": "insufficient_core_candidates",
+                "message": "semantic candidates cannot drive animation mapping without hips, spine, and head.",
+                "missing_roles": missing_core,
+                "reasons": reasons,
+            }
+        )
+    return sorted(diagnostics, key=lambda item: (str(item.get("code", "")), str(item.get("message", ""))))
 
 
 def write_candidates_json(candidates_or_report: list[dict[str, Any]] | dict[str, Any], path: str | Path) -> Path:

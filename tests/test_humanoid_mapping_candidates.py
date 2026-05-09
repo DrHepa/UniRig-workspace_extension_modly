@@ -24,9 +24,11 @@ from unirig_ext.humanoid_mapping_candidates import (
     FULL_TOPOLOGY_SUFFICIENT_ASSETS,
     REAL_CORPUS_ENV_VAR,
     REPRESENTATIVE_CORPUS_ASSETS,
+    SEMANTIC_CANDIDATES_SCHEMA,
     CandidateInputError,
     CandidateOutputError,
     build_candidate_for_glb,
+    build_semantic_candidates_sidecar,
     build_candidate_reports,
     build_full_topology_sufficient_corpus_manifest,
     build_representative_corpus_manifest,
@@ -81,6 +83,32 @@ class HumanoidMappingCandidateSchemaTests(unittest.TestCase):
             self.assertEqual(candidate["roles"]["left_lower_arm"]["confidence"], 0.0)
             self.assertIn("semantic_spine_missing", candidate["roles"]["left_lower_arm"]["fail_reasons"])
             self.assertIn("semantic_spine_missing", [item["code"] for item in candidate["diagnostics"]])
+
+    def test_semantic_candidates_sidecar_is_untrusted_and_never_publishes_contract(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="unirig-semantic-sidecar-") as temp_dir:
+            root = Path(temp_dir)
+            glb = write_resolver_ready_glb(root / "ready.glb")
+            candidate = build_candidate_for_glb(glb, source="synthetic-test")
+
+            sidecar_candidates = build_semantic_candidates_sidecar(candidate, unsafe_flags=["sleeve_branch_under_arm"])
+
+            self.assertEqual(sidecar_candidates["schema"], SEMANTIC_CANDIDATES_SCHEMA)
+            self.assertNotIn("humanoid_contract", sidecar_candidates)
+            self.assertEqual(sidecar_candidates["trust"], {
+                "trusted": False,
+                "stabilization_eligible": False,
+                "reason": "contract_missing_or_untrusted",
+            })
+            self.assertEqual(sidecar_candidates["status"], "candidate")
+            for role in ("hips", "spine", "head"):
+                role_payload = sidecar_candidates["roles"][role]
+                self.assertFalse(role_payload["rejected"])
+                self.assertEqual(role_payload["unsafe_flags"], [])
+                self.assertIn("semantic_humanoid_resolver", role_payload["reasons"])
+            rejected = sidecar_candidates["rejected_candidates"]
+            self.assertGreaterEqual(len(rejected), 1)
+            self.assertLessEqual(len(rejected), 5)
+            self.assertIn("sleeve_branch_under_arm", rejected[0]["unsafe_flags"])
 
     def _write_short_trunk_glb(self, target: Path) -> Path:
         nodes = [

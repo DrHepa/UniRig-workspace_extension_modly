@@ -18,9 +18,10 @@ if str(TESTS) not in sys.path:
 
 from test_metadata import MetadataTests, complete_humanoid_source
 from test_humanoid_source import write_glb_json
-from test_humanoid_quality_gate import _declared_roles, write_embedded_skin_glb
+from test_humanoid_quality_gate import _declared_roles, _write_glb, write_embedded_skin_glb
 from fixtures.unirig_real_topology import real_unirig_52_payload
 from unirig_ext.metadata import build_sidecar
+from unirig_ext.humanoid_mapping_candidates import SEMANTIC_CANDIDATES_SCHEMA
 
 
 class MetadataSidecarModeTests(unittest.TestCase):
@@ -166,6 +167,64 @@ class MetadataSidecarModeTests(unittest.TestCase):
         self.assertEqual(payload["humanoid_provenance"]["diagnostic"]["code"], "unsafe_for_humanoid_retarget")
         self.assertIn("semantic_body_graph", payload["humanoid_provenance"]["diagnostic"])
         self.assertIn("sleeve_branch_under_arm", {reason["code"] for reason in payload["humanoid_provenance"]["diagnostic"]["reasons"]})
+
+    def test_auto_mode_with_unsafe_accessory_evidence_emits_untrusted_semantic_candidates(self) -> None:
+        write_embedded_skin_glb(self.output_mesh, sleeve=True, semantic_connected=True)
+        self.output_mesh.with_name("avatar_unirig.humanoid.json").write_text(json.dumps(_declared_roles()), encoding="utf-8")
+
+        payload = build_sidecar(self.output_mesh, self.input_mesh, 12345, self.context, metadata_mode="auto")
+
+        self.assertNotIn("humanoid_contract", payload)
+        self.assertEqual(payload["humanoid_contract_status"], "contract_missing_or_untrusted")
+        candidates = payload["semantic_candidates"]
+        self.assertEqual(candidates["schema"], SEMANTIC_CANDIDATES_SCHEMA)
+        self.assertEqual(candidates["trust"], {
+            "trusted": False,
+            "stabilization_eligible": False,
+            "reason": "contract_missing_or_untrusted",
+        })
+        self.assertEqual(candidates["status"], "candidate")
+        for role in ("hips", "spine", "head"):
+            with self.subTest(role=role):
+                self.assertIn(role, candidates["roles"])
+                self.assertGreaterEqual(candidates["roles"][role]["confidence"], 0.75)
+                self.assertEqual(candidates["roles"][role]["unsafe_flags"], [])
+        self.assertEqual(candidates["chains"]["torso"], ["hips", "spine", "chest", "neck", "head"])
+        self.assertGreaterEqual(candidates["topology"]["joint_count"], 17)
+        self.assertLessEqual(len(candidates["rejected_candidates"]), 5)
+        self.assertEqual(candidates["transforms"]["matrix_order"], "row-major")
+        self.assertIn(candidates["roles"]["hips"]["node_id"], candidates["transforms"]["nodes"])
+
+    def test_auto_mode_with_too_few_no_core_joints_emits_blocked_candidate_diagnostics(self) -> None:
+        self._write_too_few_no_core_glb(self.output_mesh)
+
+        payload = build_sidecar(self.output_mesh, self.input_mesh, 12345, self.context, metadata_mode="auto")
+
+        self.assertNotIn("humanoid_contract", payload)
+        self.assertEqual(payload["humanoid_contract_status"], "contract_missing_or_untrusted")
+        candidates = payload["semantic_candidates"]
+        self.assertEqual(candidates["schema"], SEMANTIC_CANDIDATES_SCHEMA)
+        self.assertEqual(candidates["status"], "blocked")
+        self.assertFalse(candidates["trust"]["trusted"])
+        self.assertFalse(candidates["trust"]["stabilization_eligible"])
+        self.assertEqual(candidates["topology"]["joint_count"], 5)
+        self.assertIn("insufficient_core_candidates", {item["code"] for item in candidates["diagnostics"]})
+        missing_core = next(item for item in candidates["diagnostics"] if item["code"] == "insufficient_core_candidates")
+        self.assertEqual(missing_core["missing_roles"], ["head", "hips", "spine"])
+        self.assertIn("too_few_joints", missing_core["reasons"])
+
+    def _write_too_few_no_core_glb(self, target: Path) -> Path:
+        nodes = [
+            {"name": "accessory_root", "translation": [0.0, 0.0, 0.0], "children": [1, 2]},
+            {"name": "left_leaf", "translation": [-0.1, 0.1, 0.0]},
+            {"name": "right_leaf", "translation": [0.1, 0.1, 0.0], "children": [3]},
+            {"name": "tip", "translation": [0.0, 0.1, 0.0], "children": [4]},
+            {"name": "ornament", "translation": [0.0, 0.1, 0.0]},
+        ]
+        positions = [(0.0, 0.0, 0.0), (-0.1, 0.1, 0.0), (0.1, 0.1, 0.0)]
+        joint_rows = [(0, 0, 0, 0), (1, 0, 0, 0), (4, 0, 0, 0)]
+        weight_rows = [(1.0, 0.0, 0.0, 0.0) for _ in positions]
+        return _write_glb(target, nodes=nodes, joints=list(range(len(nodes))), positions=positions, joint_rows=joint_rows, weight_rows=weight_rows)
 
     def test_legacy_mode_suppresses_humanoid_fields_even_with_unsafe_semantic_evidence(self) -> None:
         write_embedded_skin_glb(self.output_mesh, sleeve=True)
