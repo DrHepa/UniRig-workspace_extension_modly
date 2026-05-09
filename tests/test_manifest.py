@@ -20,6 +20,15 @@ FORBIDDEN_PRIVATE_FIELDS = (
     "uiHook",
     "ui_hook",
 )
+FORBIDDEN_GENERATION_PROFILE_PASSTHROUGH_PARAMS = (
+    "task",
+    "class",
+    "cls",
+    "yaml",
+    "config",
+    "generation_kwargs",
+    "generate_kwargs",
+)
 REQUIRED_ROOT_ARTIFACTS = (
     "manifest.json",
     "processor.py",
@@ -88,6 +97,22 @@ class ManifestContractTests(unittest.TestCase):
         self.assertEqual(validate_manifest_contract(manifest, ROOT), [])
         composite_id = f"{manifest['id']}/{manifest['nodes'][0]['id']}"
         self.assertEqual(composite_id, "unirig-process-extension/rig-mesh")
+
+    def test_manifest_exposes_safe_generation_profile_enum_only(self) -> None:
+        manifest = json.loads((ROOT / "manifest.json").read_text(encoding="utf-8"))
+        params = manifest["nodes"][0]["params_schema"]
+        by_id = {param["id"]: param for param in params}
+
+        generation_profile = by_id["generation_profile"]
+        self.assertEqual(generation_profile["type"], "select")
+        self.assertEqual(generation_profile["default"], "articulationxl")
+        self.assertEqual(
+            [option["value"] for option in generation_profile["options"]],
+            ["articulationxl", "vroid"],
+        )
+        self.assertIn("Experimental", by_id["generation_profile"]["options"][1]["label"])
+        for forbidden in FORBIDDEN_GENERATION_PROFILE_PASSTHROUGH_PARAMS:
+            self.assertNotIn(forbidden, by_id)
 
     def test_manifest_rejects_private_or_invalid_shape(self) -> None:
         invalid = {

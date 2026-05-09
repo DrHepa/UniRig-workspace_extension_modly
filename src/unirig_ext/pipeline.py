@@ -11,6 +11,7 @@ from typing import Callable
 
 from . import blender_bridge, io
 from .bootstrap import LINUX_ARM64_PERSISTED_STAGE_PROOF_NAMES, REAL_RUNTIME_MODE, RuntimeContext, UniRigError, stage_environment
+from .generation_profile import ARTICULATIONXL_SKELETON_TASK, GenerationProfile, normalize_generation_profile, resolve_generation_profile
 
 
 @dataclass(frozen=True)
@@ -37,7 +38,7 @@ class PipelineError(UniRigError):
 
 ProgressFn = Callable[[int, str], None]
 LogFn = Callable[[str], None]
-SKELETON_TASK = "configs/task/quick_inference_skeleton_articulationxl_ar_256.yaml"
+SKELETON_TASK = ARTICULATIONXL_SKELETON_TASK
 SKIN_TASK = "configs/task/quick_inference_unirig_skin.yaml"
 SKIN_DATA_NAME = "raw_data.npz"
 MERGE_REQUIRE_SUFFIX = "obj,fbx,FBX,dae,glb,gltf,vrm"
@@ -76,6 +77,7 @@ def run(
     progress: ProgressFn | None = None,
     log: LogFn | None = None,
     workspace_dir: Path | None = None,
+    generation_profile: GenerationProfile | None = None,
 ) -> Path:
     progress = progress or (lambda percent, label: None)
     log = log or (lambda message: None)
@@ -101,6 +103,7 @@ def run(
         progress=progress,
         log=log,
         workspace_dir=workspace_dir,
+        generation_profile=generation_profile or normalize_generation_profile(params),
     )
     progress(98, "output published")
     return published
@@ -115,6 +118,7 @@ def _run_real_pipeline(
     progress: ProgressFn,
     log: LogFn,
     workspace_dir: Path | None,
+    generation_profile: GenerationProfile,
 ) -> Path:
     seed = int(params.get("seed", 12345))
     prepared = io.prepare_input_mesh(staged_input, run_dir, context)
@@ -127,6 +131,7 @@ def _run_real_pipeline(
         context=context,
         seed=seed,
         staged_input_path=staged_input,
+        generation_profile=generation_profile,
     )
     staged_files = [stage.runtime_input_path for stage in plan if stage.runtime_input_path is not None]
 
@@ -161,6 +166,7 @@ def build_execution_plan(
     context: RuntimeContext,
     seed: int,
     staged_input_path: Path | None = None,
+    generation_profile: GenerationProfile | None = None,
 ) -> list[ExecutionStage]:
 
     stage_token = RUNTIME_STAGE_TOKEN
@@ -173,6 +179,11 @@ def build_execution_plan(
     merged_output = run_dir / "merged.glb"
     skeleton_npz_dir = run_dir / "skeleton_npz"
     skin_npz_dir = run_dir / "skin_npz"
+    resolved_profile = resolve_generation_profile(
+        generation_profile or normalize_generation_profile({}),
+        context=context,
+        run_dir=run_dir,
+    )
 
     return [
         ExecutionStage(
@@ -197,7 +208,7 @@ def build_execution_plan(
         ExecutionStage(
             name="skeleton",
             command=_prediction_command(
-                task=SKELETON_TASK,
+                task=resolved_profile.skeleton_task,
                 input_name=staged_prepared.name,
                 output_path=skeleton_output,
                 npz_dir=skeleton_npz_dir,

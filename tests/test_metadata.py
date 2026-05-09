@@ -22,6 +22,7 @@ if str(TESTS) not in __import__("sys").path:
 
 from unirig_ext import bootstrap
 from unirig_ext.bootstrap import RuntimeContext
+from unirig_ext.generation_profile import normalize_generation_profile, resolve_generation_profile
 from unirig_ext.io import derive_output_path
 from unirig_ext.humanoid_contract import (
     HUMANOID_SCHEMA,
@@ -199,6 +200,52 @@ class MetadataTests(unittest.TestCase):
         self.assertNotIn("vendor_source", payload["runtime"])
         self.assertNotIn("runtime_root", payload["runtime"])
         self.assertNotIn("bootstrap_version", payload["runtime"])
+
+    def test_default_sidecar_reports_stable_generation_profile_without_trust_effect(self) -> None:
+        payload = build_sidecar(self.output_mesh, self.input_mesh, 7, self.context, metadata_mode="legacy")
+
+        self.assertEqual(payload["generation_profile"], "articulationxl")
+        self.assertEqual(payload["generation_profile_status"], "stable")
+        self.assertEqual(
+            payload["generation_diagnostics"],
+            {
+                "skeleton_prior": "articulationxl",
+                "profile_config_source": "upstream_task",
+                "trust_effect": "none",
+            },
+        )
+        self.assertNotIn("humanoid_contract", payload)
+
+    def test_vroid_sidecar_reports_experimental_generated_config_without_trust_upgrade(self) -> None:
+        source_path = self.context.unirig_dir / "configs/task/quick_inference_skeleton_articulationxl_ar_256.yaml"
+        source_path.parent.mkdir(parents=True, exist_ok=True)
+        source_path.write_text(
+            json.dumps(
+                {
+                    "task": {"name": "skeleton", "assign_cls": "articulationxl"},
+                    "system": {"skeleton_prior": "articulationxl"},
+                    "generate_kwargs": {"cls": "articulationxl"},
+                    "tokenizer": {"skeleton_order": ["hips", "spine", "head"]},
+                },
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
+        profile = resolve_generation_profile(
+            normalize_generation_profile({"generation_profile": "vroid"}),
+            context=self.context,
+            run_dir=self.temp_dir / "run-vroid",
+        )
+
+        payload = build_sidecar(self.output_mesh, self.input_mesh, 7, self.context, metadata_mode="legacy", generation_profile=profile)
+
+        self.assertEqual(payload["generation_profile"], "vroid")
+        self.assertEqual(payload["generation_profile_status"], "experimental")
+        self.assertEqual(payload["generation_diagnostics"]["skeleton_prior"], "vroid")
+        self.assertEqual(payload["generation_diagnostics"]["profile_config_source"], "generated_run_config")
+        self.assertEqual(payload["generation_diagnostics"]["trust_effect"], "none")
+        self.assertEqual(payload["generation_diagnostics"]["generated_config_sha256"], profile.generated_config_sha256)
+        self.assertNotIn("humanoid_contract", payload)
 
     def test_build_contract_from_declared_data_covers_core_roles_and_optional_fingers(self) -> None:
         contract = build_contract_from_declared_data(

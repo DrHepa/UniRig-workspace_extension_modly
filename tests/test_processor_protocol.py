@@ -657,8 +657,11 @@ class ProcessorProtocolTests(unittest.TestCase):
         workspace_dir.mkdir(parents=True, exist_ok=True)
 
         def configure_pipeline(pipeline_module: object, stack: ExitStack) -> None:
-            def fake_run(*, mesh_path: Path, params: dict, context: RuntimeContext, progress: Callable, log: Callable, workspace_dir: Path | None = None) -> Path:
-                del mesh_path, params, context, progress, log
+            def fake_run(
+                *, mesh_path: Path, params: dict, context: RuntimeContext, progress: Callable, log: Callable,
+                workspace_dir: Path | None = None, generation_profile: object | None = None
+            ) -> Path:
+                del mesh_path, params, context, progress, log, generation_profile
                 raise pipeline_module.io.OutputPublicationError(
                     "Failed to publish UniRig output into the workspace Workflows directory. "
                     f"workspaceDir={workspace_dir}; target={workspace_dir / 'Workflows' / 'avatar_unirig.glb'}; error: workspace denied"
@@ -682,8 +685,11 @@ class ProcessorProtocolTests(unittest.TestCase):
 
     def test_processor_emits_error_without_done_when_humanoid_contract_validation_fails(self) -> None:
         def configure_pipeline(pipeline_module: object, stack: ExitStack) -> None:
-            def fake_run(*, mesh_path: Path, params: dict, context: RuntimeContext, progress: Callable, log: Callable, workspace_dir: Path | None = None) -> Path:
-                del params, context, progress, log, workspace_dir
+            def fake_run(
+                *, mesh_path: Path, params: dict, context: RuntimeContext, progress: Callable, log: Callable,
+                workspace_dir: Path | None = None, generation_profile: object | None = None
+            ) -> Path:
+                del params, context, progress, log, workspace_dir, generation_profile
                 output_path = mesh_path.with_name(f"{mesh_path.stem}_unirig.glb")
                 output_path.write_bytes(b"published")
                 return output_path
@@ -781,10 +787,100 @@ class ProcessorProtocolTests(unittest.TestCase):
         self.assertIn("metadata_mode", result["messages"][-1]["message"])
         self.assertIn("auto, legacy, humanoid", result["messages"][-1]["message"])
 
+    def test_processor_defaults_generation_profile_before_generation(self) -> None:
+        calls: list[dict] = []
+
+        def configure_pipeline(pipeline_module: object, stack: ExitStack) -> None:
+            def fake_run(**kwargs: object) -> Path:
+                calls.append(kwargs)
+                mesh_path = kwargs["mesh_path"]
+                assert isinstance(mesh_path, Path)
+                output_path = mesh_path.with_name(f"{mesh_path.stem}_unirig.glb")
+                output_path.write_bytes(b"published")
+                return output_path
+
+            stack.enter_context(mock.patch.object(pipeline_module, "run", side_effect=fake_run))
+
+        def configure_metadata(metadata_module: object, stack: ExitStack) -> None:
+            stack.enter_context(mock.patch.object(metadata_module, "write_sidecar", return_value=self.input_mesh.with_suffix(".rigmeta.json")))
+
+        result = self._run_processor_inprocess_with_pipeline_patches(
+            {"input": {"filePath": str(self.input_mesh), "nodeId": "rig-mesh"}, "params": {"seed": 43}},
+            configure_pipeline=configure_pipeline,
+            configure_metadata=configure_metadata,
+        )
+
+        self.assertEqual(result["exit_code"], 0, msg=result["stderr"])
+        self.assertEqual(calls[0]["generation_profile"].name, "articulationxl")
+        self.assertEqual(calls[0]["generation_profile"].status, "stable")
+
+    def test_processor_accepts_explicit_vroid_generation_profile_before_generation(self) -> None:
+        calls: list[dict] = []
+
+        def configure_pipeline(pipeline_module: object, stack: ExitStack) -> None:
+            def fake_run(**kwargs: object) -> Path:
+                calls.append(kwargs)
+                mesh_path = kwargs["mesh_path"]
+                assert isinstance(mesh_path, Path)
+                output_path = mesh_path.with_name(f"{mesh_path.stem}_unirig.glb")
+                output_path.write_bytes(b"published")
+                return output_path
+
+            stack.enter_context(mock.patch.object(pipeline_module, "run", side_effect=fake_run))
+
+        def configure_metadata(metadata_module: object, stack: ExitStack) -> None:
+            stack.enter_context(mock.patch.object(metadata_module, "write_sidecar", return_value=self.input_mesh.with_suffix(".rigmeta.json")))
+
+        result = self._run_processor_inprocess_with_pipeline_patches(
+            {"input": {"filePath": str(self.input_mesh), "nodeId": "rig-mesh"}, "params": {"generation_profile": "vroid"}},
+            configure_pipeline=configure_pipeline,
+            configure_metadata=configure_metadata,
+        )
+
+        self.assertEqual(result["exit_code"], 0, msg=result["stderr"])
+        self.assertEqual(calls[0]["generation_profile"].name, "vroid")
+        self.assertEqual(calls[0]["generation_profile"].status, "experimental")
+
+    def test_processor_rejects_invalid_generation_profile_before_generation(self) -> None:
+        def configure_pipeline(pipeline_module: object, stack: ExitStack) -> None:
+            stack.enter_context(mock.patch.object(pipeline_module, "run", side_effect=AssertionError("pipeline must not run")))
+
+        for value in ("mixamo", "unknown", 7):
+            with self.subTest(value=value):
+                result = self._run_processor_inprocess_with_pipeline_patches(
+                    {"input": {"filePath": str(self.input_mesh), "nodeId": "rig-mesh"}, "params": {"generation_profile": value}},
+                    configure_pipeline=configure_pipeline,
+                )
+
+                self.assertNotEqual(result["exit_code"], 0)
+                self.assertFalse(any(message["type"] == "done" for message in result["messages"]))
+                self.assertEqual(result["messages"][-1]["type"], "error")
+                self.assertIn("generation_profile", result["messages"][-1]["message"])
+
+    def test_processor_rejects_generation_passthrough_fields_before_generation(self) -> None:
+        def configure_pipeline(pipeline_module: object, stack: ExitStack) -> None:
+            stack.enter_context(mock.patch.object(pipeline_module, "run", side_effect=AssertionError("pipeline must not run")))
+
+        for field in ("task", "class", "cls", "yaml", "config", "generation_kwargs", "generate_kwargs"):
+            with self.subTest(field=field):
+                result = self._run_processor_inprocess_with_pipeline_patches(
+                    {"input": {"filePath": str(self.input_mesh), "nodeId": "rig-mesh"}, "params": {field: "unsafe"}},
+                    configure_pipeline=configure_pipeline,
+                )
+
+                self.assertNotEqual(result["exit_code"], 0)
+                self.assertFalse(any(message["type"] == "done" for message in result["messages"]))
+                self.assertEqual(result["messages"][-1]["type"], "error")
+                self.assertIn("unsupported", result["messages"][-1]["message"])
+                self.assertIn(field, result["messages"][-1]["message"])
+
     def test_processor_humanoid_mode_failure_emits_error_without_done(self) -> None:
         def configure_pipeline(pipeline_module: object, stack: ExitStack) -> None:
-            def fake_run(*, mesh_path: Path, params: dict, context: RuntimeContext, progress: Callable, log: Callable, workspace_dir: Path | None = None) -> Path:
-                del params, context, progress, log, workspace_dir
+            def fake_run(
+                *, mesh_path: Path, params: dict, context: RuntimeContext, progress: Callable, log: Callable,
+                workspace_dir: Path | None = None, generation_profile: object | None = None
+            ) -> Path:
+                del params, context, progress, log, workspace_dir, generation_profile
                 output_path = mesh_path.with_name(f"{mesh_path.stem}_unirig.glb")
                 output_path.write_bytes(b"published")
                 return output_path
@@ -806,8 +902,11 @@ class ProcessorProtocolTests(unittest.TestCase):
         write_glb_json(self.input_mesh, real_unirig_40_payload())
 
         def configure_pipeline(pipeline_module: object, stack: ExitStack) -> None:
-            def fake_run(*, mesh_path: Path, params: dict, context: RuntimeContext, progress: Callable, log: Callable, workspace_dir: Path | None = None) -> Path:
-                del params, context, progress, log, workspace_dir
+            def fake_run(
+                *, mesh_path: Path, params: dict, context: RuntimeContext, progress: Callable, log: Callable,
+                workspace_dir: Path | None = None, generation_profile: object | None = None
+            ) -> Path:
+                del params, context, progress, log, workspace_dir, generation_profile
                 output_path = mesh_path.with_name(f"{mesh_path.stem}_unirig.glb")
                 write_glb_json(output_path, short_trunk_output_payload(prefix="out"))
                 return output_path

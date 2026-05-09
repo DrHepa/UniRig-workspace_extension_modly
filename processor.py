@@ -12,6 +12,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from unirig_ext import bootstrap, io, metadata, pipeline  # noqa: E402
+from unirig_ext.generation_profile import normalize_generation_profile  # noqa: E402
 from unirig_ext.metadata_mode import normalize_metadata_mode  # noqa: E402
 
 
@@ -83,6 +84,7 @@ def main() -> int:
         input_payload = _require_object(payload, "input")
         params = _require_object(payload, "params")
         metadata_mode = normalize_metadata_mode(params)
+        generation_profile = normalize_generation_profile(params)
         workspace_dir = _resolve_workspace_dir(payload)
         node_id = input_payload.get("nodeId") or payload.get("nodeId") or ""
 
@@ -109,6 +111,7 @@ def main() -> int:
             progress=_progress,
             log=_log,
             workspace_dir=workspace_dir,
+            generation_profile=generation_profile,
         )
 
         metadata.write_sidecar(
@@ -117,6 +120,7 @@ def main() -> int:
             seed=int(params.get("seed", 12345)),
             context=context,
             metadata_mode=metadata_mode,
+            generation_profile=generation_profile,
         )
         _send({"type": "done", "result": {"filePath": str(output_path)}})
         return 0

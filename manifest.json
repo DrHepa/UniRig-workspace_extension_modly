@@ -42,6 +42,23 @@
             }
           ],
           "tooltip": "Controls .rigmeta.json humanoid contract emission: auto falls back safely, legacy suppresses humanoid data, humanoid fails closed."
+        },
+        {
+          "id": "generation_profile",
+          "label": "Generation Profile",
+          "type": "select",
+          "default": "articulationxl",
+          "options": [
+            {
+              "value": "articulationxl",
+              "label": "ArticulationXL"
+            },
+            {
+              "value": "vroid",
+              "label": "VRoid (Experimental)"
+            }
+          ],
+          "tooltip": "Selects the skeleton generation prior/config only. VRoid is experimental and does not alter humanoid trust or metadata mode semantics."
         }
       ]
     }

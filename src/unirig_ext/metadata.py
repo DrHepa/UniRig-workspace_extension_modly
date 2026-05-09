@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from .bootstrap import RuntimeContext
+from .generation_profile import GenerationProfile, normalize_generation_profile, sidecar_diagnostics
 from .io import sha256_file
 from .humanoid_contract import HumanoidContractError, build_contract_from_declared_data
 from .humanoid_mapping_candidates import CandidateInputError, build_candidate_for_glb, build_semantic_candidates_sidecar
@@ -24,8 +25,10 @@ def build_sidecar(
     context: RuntimeContext,
     humanoid_source: dict[str, Any] | None = None,
     metadata_mode: str = "auto",
+    generation_profile: GenerationProfile | None = None,
 ) -> dict:
     mode = normalize_metadata_mode({"metadata_mode": metadata_mode})
+    profile = generation_profile or normalize_generation_profile({})
     source_sha256 = sha256_file(input_path)
     output_sha256 = sha256_file(output_path)
     payload = {
@@ -46,6 +49,9 @@ def build_sidecar(
             "stages": ["prepare", "skeleton", "skin", "merge"],
             "deterministic_output_name": output_path.name,
         },
+        "generation_profile": profile.name,
+        "generation_profile_status": profile.status,
+        "generation_diagnostics": sidecar_diagnostics(profile),
     }
     if mode != "legacy":
         _apply_humanoid_metadata(
@@ -74,6 +80,7 @@ def write_sidecar(
     context: RuntimeContext,
     humanoid_source: dict[str, Any] | None = None,
     metadata_mode: str = "auto",
+    generation_profile: GenerationProfile | None = None,
 ) -> Path:
     payload = build_sidecar(
         output_path=output_path,
@@ -82,6 +89,7 @@ def write_sidecar(
         context=context,
         humanoid_source=humanoid_source,
         metadata_mode=metadata_mode,
+        generation_profile=generation_profile,
     )
     destination = sidecar_path_for(output_path)
     destination.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
