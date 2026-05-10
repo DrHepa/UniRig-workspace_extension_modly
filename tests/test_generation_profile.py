@@ -7,6 +7,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -24,21 +25,95 @@ from unirig_ext.generation_profile import (
 )
 
 
-def write_vroid_source_config(unirig_dir: Path, *, omit: str | None = None) -> Path:
-    config = {
-        "task": {"name": "skeleton", "assign_cls": "articulationxl"},
-        "system": {"skeleton_prior": "articulationxl"},
-        "generate_kwargs": {"cls": "articulationxl"},
-        "tokenizer": {"skeleton_order": ["hips", "spine", "head"]},
-    }
-    if omit == "system.skeleton_prior":
-        del config["system"]["skeleton_prior"]
-    elif omit is not None:
-        config.pop(omit, None)
-    path = unirig_dir / pipeline.SKELETON_TASK
+def write_yaml(path: Path, data: dict[str, Any]) -> None:
+    try:
+        import yaml  # type: ignore[import-untyped]
+    except ImportError:  # pragma: no cover - production runtime depends on PyYAML; JSON is YAML-compatible fallback.
+        text = json.dumps(data, indent=2, sort_keys=True)
+    else:
+        text = yaml.safe_dump(data, sort_keys=False)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(config, indent=2, sort_keys=True), encoding="utf-8")
-    return path
+    path.write_text(text, encoding="utf-8")
+
+
+def read_yaml(path: Path) -> dict[str, Any]:
+    try:
+        import yaml  # type: ignore[import-untyped]
+    except ImportError:  # pragma: no cover
+        return json.loads(path.read_text(encoding="utf-8"))
+    loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
+    if not isinstance(loaded, dict):
+        raise AssertionError(f"expected object YAML at {path}")
+    return loaded
+
+
+def write_vroid_source_config(unirig_dir: Path, *, omit: str | None = None) -> dict[str, Path]:
+    paths = {
+        "task": unirig_dir / pipeline.SKELETON_TASK,
+        "system": unirig_dir / "configs/system/ar_inference_articulationxl.yaml",
+        "tokenizer": unirig_dir / "configs/tokenizer/tokenizer_parts_articulationxl_256.yaml",
+        "skeleton": unirig_dir / "configs/skeleton/vroid.yaml",
+    }
+    task_config: dict[str, Any] = {
+        "mode": "predict",
+        "debug": False,
+        "experiment_name": "quick_inference_skeleton_articulationxl_ar_256",
+        "resume_from_checkpoint": "experiments/skeleton/articulation-xl_quantization_256/model.ckpt",
+        "components": {
+            "data": "quick_inference",
+            "tokenizer": "tokenizer_parts_articulationxl_256",
+            "transform": "inference_ar_transform",
+            "model": "unirig_ar_350m_1024_81920_float32",
+            "system": "ar_inference_articulationxl",
+            "data_name": "raw_data.npz",
+        },
+        "writer": {"__target__": "ar", "output_dir": None, "add_num": False, "repeat": 1, "export_npz": "predict_skeleton", "export_obj": "skeleton", "export_fbx": "skeleton"},
+        "trainer": {"max_epochs": 1, "num_nodes": 1, "devices": 1, "precision": "bf16-mixed", "accelerator": "gpu", "strategy": "auto"},
+    }
+    system_config: dict[str, Any] = {
+        "__target__": "ar",
+        "val_interval": 1,
+        "generate_kwargs": {
+            "max_new_tokens": 2048,
+            "num_return_sequences": 1,
+            "num_beams": 15,
+            "do_sample": True,
+            "top_k": 5,
+            "top_p": 0.95,
+            "repetition_penalty": 3.0,
+            "temperature": 1.5,
+            "no_cls": False,
+            "assign_cls": "articulationxl",
+            "use_dir_cls": False,
+        },
+    }
+    tokenizer_config: dict[str, Any] = {
+        "method": "tokenizer_part",
+        "num_discrete": 256,
+        "continuous_range": [-1, 1],
+        "cls_token_id": {"vroid": 0, "mixamo": 1, "articulationxl": 2},
+        "parts_token_id": {"body": 0, "hand": 1},
+        "order_config": {"skeleton_path": {"vroid": "./configs/skeleton/vroid.yaml", "mixamo": "./configs/skeleton/mixamo.yaml"}},
+    }
+    skeleton_config: dict[str, Any] = {"skeleton": "vroid", "joints": ["hips", "spine", "head"]}
+
+    if omit == "components.system":
+        del task_config["components"]["system"]
+    elif omit == "components.tokenizer":
+        del task_config["components"]["tokenizer"]
+    elif omit == "generate_kwargs.assign_cls":
+        del system_config["generate_kwargs"]["assign_cls"]
+    elif omit == "cls_token_id.vroid":
+        del tokenizer_config["cls_token_id"]["vroid"]
+    elif omit == "order_config.skeleton_path.vroid":
+        del tokenizer_config["order_config"]["skeleton_path"]["vroid"]
+
+    write_yaml(paths["task"], task_config)
+    write_yaml(paths["system"], system_config)
+    write_yaml(paths["tokenizer"], tokenizer_config)
+    if omit != "skeleton_path_exists":
+        write_yaml(paths["skeleton"], skeleton_config)
+    return paths
 
 
 class GenerationProfileTests(unittest.TestCase):
@@ -97,8 +172,8 @@ class GenerationProfileTests(unittest.TestCase):
         self.assertIsNone(resolved.generated_config_path)
 
     def test_vroid_resolves_to_deterministic_run_local_config_without_vendor_mutation(self) -> None:
-        vendor_config = write_vroid_source_config(self.context.unirig_dir)
-        before = vendor_config.read_bytes()
+        vendor_paths = write_vroid_source_config(self.context.unirig_dir)
+        before = {name: path.read_bytes() for name, path in vendor_paths.items()}
         first_run = self.run_dir / "first"
         second_run = self.run_dir / "second"
         first_run.mkdir()
@@ -107,19 +182,36 @@ class GenerationProfileTests(unittest.TestCase):
         first = resolve_generation_profile(normalize_generation_profile({"generation_profile": "vroid"}), context=self.context, run_dir=first_run)
         second = resolve_generation_profile(normalize_generation_profile({"generation_profile": "vroid"}), context=self.context, run_dir=second_run)
 
-        self.assertEqual(vendor_config.read_bytes(), before)
+        self.assertEqual({name: path.read_bytes() for name, path in vendor_paths.items()}, before)
         self.assertEqual(first.status, "experimental")
         self.assertEqual(first.skeleton_prior, "vroid")
         self.assertEqual(first.profile_config_source, "generated_run_config")
         self.assertTrue(first.generated_config_path.is_relative_to(first_run))
         self.assertTrue(second.generated_config_path.is_relative_to(second_run))
-        first_text = first.generated_config_path.read_text(encoding="utf-8")
-        second_text = second.generated_config_path.read_text(encoding="utf-8")
-        self.assertEqual(first_text, second_text)
-        self.assertIn('"assign_cls": "vroid"', first_text)
-        self.assertIn('"skeleton_prior": "vroid"', first_text)
-        self.assertEqual(first.generated_config_sha256, hashlib.sha256(first_text.encode("utf-8")).hexdigest())
-        self.assertEqual(first.generated_config_sha256, second.generated_config_sha256)
+        self.assertEqual(first.generated_config_path.name, "vroid_skeleton_task.yaml")
+        generated_system_path = first.generated_config_path.with_name("vroid_ar_inference_articulationxl.yaml")
+        self.assertTrue(generated_system_path.is_file())
+        first_task_text = first.generated_config_path.read_text(encoding="utf-8")
+        second_task_text = second.generated_config_path.read_text(encoding="utf-8")
+        first_system_text = generated_system_path.read_text(encoding="utf-8")
+        second_system_text = second.generated_config_path.with_name("vroid_ar_inference_articulationxl.yaml").read_text(encoding="utf-8")
+        self.assertEqual(first_system_text, second_system_text)
+        generated_task = read_yaml(first.generated_config_path)
+        second_generated_task = read_yaml(second.generated_config_path)
+        generated_system = read_yaml(generated_system_path)
+        self.assertEqual(generated_system["generate_kwargs"]["assign_cls"], "vroid")
+        self.assertNotEqual(generated_task["components"]["system"], "ar_inference_articulationxl")
+        self.assertTrue(str(generated_task["components"]["system"]).endswith("generation_profiles/vroid_ar_inference_articulationxl"))
+        generated_task_without_system = dict(generated_task)
+        second_generated_task_without_system = dict(second_generated_task)
+        generated_task_without_system["components"] = dict(generated_task["components"])
+        second_generated_task_without_system["components"] = dict(second_generated_task["components"])
+        generated_task_without_system["components"].pop("system")
+        second_generated_task_without_system["components"].pop("system")
+        self.assertEqual(generated_task_without_system, second_generated_task_without_system)
+        self.assertEqual(generated_task["components"]["tokenizer"], "tokenizer_parts_articulationxl_256")
+        self.assertEqual(first.generated_config_sha256, hashlib.sha256(first_task_text.encode("utf-8")).hexdigest())
+        self.assertEqual(second.generated_config_sha256, hashlib.sha256(second_task_text.encode("utf-8")).hexdigest())
 
     def test_pipeline_consumes_profile_only_for_skeleton_task_selection(self) -> None:
         write_vroid_source_config(self.context.unirig_dir)
@@ -151,16 +243,28 @@ class GenerationProfileTests(unittest.TestCase):
         self.assertEqual(default_plan[3].runtime_boundary_owner, vroid_plan[3].runtime_boundary_owner)
         self.assertEqual(default_plan[4].runtime_boundary_owner, vroid_plan[4].runtime_boundary_owner)
 
-    def test_vroid_missing_upstream_seam_fails_with_profile_configuration_error(self) -> None:
-        missing = write_vroid_source_config(self.context.unirig_dir, omit="system.skeleton_prior")
+    def test_vroid_missing_upstream_seams_fail_with_explicit_profile_configuration_keys(self) -> None:
+        cases = {
+            "components.system": "task",
+            "components.tokenizer": "task",
+            "generate_kwargs.assign_cls": "system",
+            "cls_token_id.vroid": "tokenizer",
+            "order_config.skeleton_path.vroid": "tokenizer",
+            "skeleton_path_exists": "skeleton",
+        }
+        for omitted, expected_path_name in cases.items():
+            with self.subTest(omitted=omitted):
+                shutil.rmtree(self.context.unirig_dir, ignore_errors=True)
+                paths = write_vroid_source_config(self.context.unirig_dir, omit=omitted)
 
-        with self.assertRaises(GenerationProfileConfigError) as raised:
-            resolve_generation_profile(normalize_generation_profile({"generation_profile": "vroid"}), context=self.context, run_dir=self.run_dir)
+                with self.assertRaises(GenerationProfileConfigError) as raised:
+                    resolve_generation_profile(normalize_generation_profile({"generation_profile": "vroid"}), context=self.context, run_dir=self.run_dir)
 
-        self.assertEqual(raised.exception.profile, "vroid")
-        self.assertEqual(raised.exception.key, "system.skeleton_prior")
-        self.assertEqual(raised.exception.path, missing)
-        self.assertIn("profile-configuration", str(raised.exception))
+                expected_key = "order_config.skeleton_path.vroid" if omitted == "skeleton_path_exists" else omitted
+                self.assertEqual(raised.exception.profile, "vroid")
+                self.assertEqual(raised.exception.key, expected_key)
+                self.assertEqual(raised.exception.path, paths[expected_path_name])
+                self.assertIn("profile-configuration", str(raised.exception))
 
 
 if __name__ == "__main__":

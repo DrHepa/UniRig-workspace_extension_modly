@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -26,6 +27,9 @@ REJECTED_GENERATION_PASSTHROUGH_KEYS = frozenset(
 )
 ARTICULATIONXL_SKELETON_TASK = "configs/task/quick_inference_skeleton_articulationxl_ar_256.yaml"
 VROID_GENERATED_CONFIG_RELATIVE = Path("generation_profiles") / "vroid_skeleton_task.yaml"
+VROID_GENERATED_SYSTEM_RELATIVE = Path("generation_profiles") / "vroid_ar_inference_articulationxl.yaml"
+UPSTREAM_SYSTEM_CONFIG_DIR = Path("configs/system")
+UPSTREAM_TOKENIZER_CONFIG_DIR = Path("configs/tokenizer")
 
 
 class GenerationProfileValidationError(ValueError):
@@ -134,41 +138,67 @@ def _articulationxl_profile() -> GenerationProfile:
 
 
 def _resolve_vroid_profile(*, context: RuntimeContext, run_dir: Path) -> GenerationProfile:
-    source_path = context.unirig_dir / ARTICULATIONXL_SKELETON_TASK
-    source = _load_upstream_config(source_path, profile=VROID_PROFILE)
-    generated = copy.deepcopy(source)
-    _require_path(generated, "task", source_path)
-    _require_path(generated, "system.skeleton_prior", source_path)
-    _require_path(generated, "generate_kwargs", source_path)
-    _require_path(generated, "tokenizer.skeleton_order", source_path)
+    task_source_path = context.unirig_dir / ARTICULATIONXL_SKELETON_TASK
+    task_source = _load_upstream_config(task_source_path, profile=VROID_PROFILE, key="upstream_task")
+    system_component = _require_path(task_source, "components.system", task_source_path)
+    tokenizer_component = _require_path(task_source, "components.tokenizer", task_source_path)
 
-    task = generated["task"]
-    if isinstance(task, dict):
-        task["assign_cls"] = VROID_PROFILE
-    generated["system"]["skeleton_prior"] = VROID_PROFILE
-    if isinstance(generated["generate_kwargs"], dict):
-        generated["generate_kwargs"]["cls"] = VROID_PROFILE
-    generated["tokenizer"]["skeleton_prior"] = VROID_PROFILE
+    system_source_path = _component_config_path(
+        component=system_component,
+        component_key="components.system",
+        config_dir=context.unirig_dir / UPSTREAM_SYSTEM_CONFIG_DIR,
+        task_path=task_source_path,
+    )
+    tokenizer_source_path = _component_config_path(
+        component=tokenizer_component,
+        component_key="components.tokenizer",
+        config_dir=context.unirig_dir / UPSTREAM_TOKENIZER_CONFIG_DIR,
+        task_path=task_source_path,
+    )
 
-    rendered = json.dumps(generated, indent=2, sort_keys=True) + "\n"
-    destination = run_dir / VROID_GENERATED_CONFIG_RELATIVE
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    destination.write_text(rendered, encoding="utf-8")
+    system_source = _load_upstream_config(system_source_path, profile=VROID_PROFILE, key="components.system")
+    tokenizer_source = _load_upstream_config(tokenizer_source_path, profile=VROID_PROFILE, key="components.tokenizer")
+    _require_path(system_source, "generate_kwargs.assign_cls", system_source_path)
+    _require_path(tokenizer_source, "cls_token_id.vroid", tokenizer_source_path)
+    skeleton_path_value = _require_path(tokenizer_source, "order_config.skeleton_path.vroid", tokenizer_source_path)
+    skeleton_path = _resolve_skeleton_path(skeleton_path_value, context=context, tokenizer_path=tokenizer_source_path)
+    if not skeleton_path.exists():
+        raise GenerationProfileConfigError(
+            profile=VROID_PROFILE,
+            key="order_config.skeleton_path.vroid",
+            path=skeleton_path,
+            message="referenced vroid skeleton config is missing",
+        )
+
+    generated_system = copy.deepcopy(system_source)
+    generated_system["generate_kwargs"]["assign_cls"] = VROID_PROFILE
+
+    generated_task = copy.deepcopy(task_source)
+    generated_system_path = run_dir / VROID_GENERATED_SYSTEM_RELATIVE
+    generated_task_path = run_dir / VROID_GENERATED_CONFIG_RELATIVE
+    generated_system_path.parent.mkdir(parents=True, exist_ok=True)
+    rendered_system = json.dumps(generated_system, indent=2, sort_keys=True) + "\n"
+    generated_system_path.write_text(rendered_system, encoding="utf-8")
+
+    generated_task["components"]["system"] = _component_reference_for_system(generated_system_path, context=context)
+    rendered = json.dumps(generated_task, indent=2, sort_keys=True) + "\n"
+    generated_task_path.parent.mkdir(parents=True, exist_ok=True)
+    generated_task_path.write_text(rendered, encoding="utf-8")
     digest = hashlib.sha256(rendered.encode("utf-8")).hexdigest()
     return GenerationProfile(
         name=VROID_PROFILE,
         status="experimental",
         skeleton_prior=VROID_PROFILE,
-        skeleton_task=str(destination),
+        skeleton_task=str(generated_task_path),
         profile_config_source="generated_run_config",
-        generated_config_path=destination,
+        generated_config_path=generated_task_path,
         generated_config_sha256=digest,
     )
 
 
-def _load_upstream_config(path: Path, *, profile: str) -> dict[str, Any]:
+def _load_upstream_config(path: Path, *, profile: str, key: str) -> dict[str, Any]:
     if not path.exists():
-        raise GenerationProfileConfigError(profile=profile, key="upstream_task", path=path, message="upstream task config is missing")
+        raise GenerationProfileConfigError(profile=profile, key=key, path=path, message="upstream config is missing")
     text = path.read_text(encoding="utf-8")
     try:
         loaded = json.loads(text)
@@ -178,7 +208,7 @@ def _load_upstream_config(path: Path, *, profile: str) -> dict[str, Any]:
         except ImportError as import_exc:
             raise GenerationProfileConfigError(
                 profile=profile,
-                key="upstream_task",
+                key=key,
                 path=path,
                 message=(
                     "upstream task config is not JSON and PyYAML is unavailable for controlled YAML seam parsing: "
@@ -190,20 +220,63 @@ def _load_upstream_config(path: Path, *, profile: str) -> dict[str, Any]:
         except Exception as exc:
             raise GenerationProfileConfigError(
                 profile=profile,
-                key="upstream_task",
+                key=key,
                 path=path,
                 message=f"upstream task config is not parseable by the controlled profile resolver: {exc}",
             ) from exc
     except OSError as exc:
         raise GenerationProfileConfigError(
             profile=profile,
-            key="upstream_task",
+            key=key,
             path=path,
             message=f"upstream task config cannot be read by the controlled profile resolver: {exc}",
         ) from exc
     if not isinstance(loaded, dict):
-        raise GenerationProfileConfigError(profile=profile, key="upstream_task", path=path, message="upstream task config must be an object")
+        raise GenerationProfileConfigError(profile=profile, key=key, path=path, message="upstream task config must be an object")
     return loaded
+
+
+def _component_config_path(*, component: Any, component_key: str, config_dir: Path, task_path: Path) -> Path:
+    if not isinstance(component, str) or not component.strip():
+        raise GenerationProfileConfigError(
+            profile=VROID_PROFILE,
+            key=component_key,
+            path=task_path,
+            message="component reference must be a non-empty string",
+        )
+    component_path = Path(component.strip())
+    if component_path.suffix == ".yaml":
+        component_path = component_path.with_suffix("")
+    if component_path.is_absolute():
+        return component_path.with_suffix(".yaml")
+    return (config_dir / component_path).with_suffix(".yaml")
+
+
+def _resolve_skeleton_path(value: Any, *, context: RuntimeContext, tokenizer_path: Path) -> Path:
+    if not isinstance(value, str) or not value.strip():
+        raise GenerationProfileConfigError(
+            profile=VROID_PROFILE,
+            key="order_config.skeleton_path.vroid",
+            path=tokenizer_path,
+            message="vroid skeleton path must be a non-empty string",
+        )
+    skeleton_path = Path(value.strip())
+    if skeleton_path.is_absolute():
+        return skeleton_path
+    return context.unirig_dir / skeleton_path
+
+
+def _component_reference_for_system(generated_system_path: Path, *, context: RuntimeContext) -> str:
+    system_config_dir = context.unirig_dir / UPSTREAM_SYSTEM_CONFIG_DIR
+    try:
+        reference = generated_system_path.with_suffix("").relative_to(system_config_dir)
+    except ValueError:
+        reference = Path(_relative_path(generated_system_path.with_suffix(""), system_config_dir))
+    return reference.as_posix()
+
+
+def _relative_path(path: Path, start: Path) -> str:
+    return os.path.relpath(path, start)
 
 
 def _require_path(config: dict[str, Any], dotted_key: str, path: Path) -> Any:

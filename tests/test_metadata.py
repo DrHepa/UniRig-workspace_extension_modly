@@ -217,20 +217,37 @@ class MetadataTests(unittest.TestCase):
         self.assertNotIn("humanoid_contract", payload)
 
     def test_vroid_sidecar_reports_experimental_generated_config_without_trust_upgrade(self) -> None:
-        source_path = self.context.unirig_dir / "configs/task/quick_inference_skeleton_articulationxl_ar_256.yaml"
-        source_path.parent.mkdir(parents=True, exist_ok=True)
-        source_path.write_text(
-            json.dumps(
+        task_path = self.context.unirig_dir / "configs/task/quick_inference_skeleton_articulationxl_ar_256.yaml"
+        system_path = self.context.unirig_dir / "configs/system/ar_inference_articulationxl.yaml"
+        tokenizer_path = self.context.unirig_dir / "configs/tokenizer/tokenizer_parts_articulationxl_256.yaml"
+        skeleton_path = self.context.unirig_dir / "configs/skeleton/vroid.yaml"
+        for path, config in (
+            (
+                task_path,
                 {
-                    "task": {"name": "skeleton", "assign_cls": "articulationxl"},
-                    "system": {"skeleton_prior": "articulationxl"},
-                    "generate_kwargs": {"cls": "articulationxl"},
-                    "tokenizer": {"skeleton_order": ["hips", "spine", "head"]},
+                    "mode": "predict",
+                    "components": {
+                        "data": "quick_inference",
+                        "tokenizer": "tokenizer_parts_articulationxl_256",
+                        "transform": "inference_ar_transform",
+                        "model": "unirig_ar_350m_1024_81920_float32",
+                        "system": "ar_inference_articulationxl",
+                        "data_name": "raw_data.npz",
+                    },
                 },
-                sort_keys=True,
             ),
-            encoding="utf-8",
-        )
+            (system_path, {"__target__": "ar", "generate_kwargs": {"assign_cls": "articulationxl"}}),
+            (
+                tokenizer_path,
+                {
+                    "cls_token_id": {"vroid": 0, "articulationxl": 2},
+                    "order_config": {"skeleton_path": {"vroid": "./configs/skeleton/vroid.yaml"}},
+                },
+            ),
+            (skeleton_path, {"skeleton": "vroid"}),
+        ):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(config, sort_keys=True), encoding="utf-8")
         profile = resolve_generation_profile(
             normalize_generation_profile({"generation_profile": "vroid"}),
             context=self.context,
