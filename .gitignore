@@ -28,3 +28,7 @@ temp/
 *.log
 .DS_Store
 .atl/
+
+# Local AI/agent tooling; not part of the public Modly extension contract
+AGENTS.md
+.gga
