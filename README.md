@@ -15,9 +15,15 @@ Everything else is **upstream-first**: the wrapper stages a pinned UniRig checko
 ## What stays stable
 
 - node id: `rig-mesh`
-- stdin payload: `input.filePath`, `input.nodeId`, optional `params.seed`, plus top-level host workspace fields such as `workspaceDir` / `tempDir`
+- stdin payload: `input.filePath`, `input.nodeId`, optional `params.seed`, `params.metadata_mode`, `params.generation_profile`, plus top-level host workspace fields such as `workspaceDir` / `tempDir`
 - stdout event types: `progress`, `log`, `done`, `error`
 - success result shape: `{"filePath": "..._unirig.glb"}`
+
+## Runtime progress and UI diagnostics
+
+The processor emits Modly-visible `log` events for each upstream stage start: `extract-prepare`, `skeleton`, `extract-skin`, `skin`, and `merge`. Stage failures keep the public JSON event shape stable, but the `error.message` now includes a bounded `Diagnostics:` block with `run_id`, `stage`, `error_code`, `expected_output`, `stage_log`, return code, and sanitized `stdout_tail` / `stderr_tail` excerpts.
+
+That means users should be able to copy the Modly UI error first instead of manually hunting under `.unirig-runtime/logs/`. The persisted logs still remain authoritative for full forensic detail.
 
 ## Workspace publication contract
 
@@ -44,6 +50,15 @@ The public node parameter `metadata_mode` controls humanoid sidecar emission wit
 - `humanoid` is fail closed. A valid humanoid source is required; if resolution or validation fails, processing emits `error` before `done` and explains how to provide metadata.
 
 Resolution priority is bounded and deterministic: adjacent companion `<output-stem>.humanoid.json` first, read-only GLB extras (`extras.unirig_humanoid`) second, and semantic resolver evidence from the published output GLB when the output skin/rest/weight evidence is strong enough. Any topology profile compatibility remains narrow and evidence-backed; unknown, ambiguous, or asset-specific topology is rejected instead of guessed. Strict humanoid publication remains fail-closed: resolver success alone is not enough; quality-gate checks can still reject unsafe high-region weights, passive/accessory contamination, non-local spread, ambiguity, or contract-insufficient output skeletons.
+
+## Skeleton generation profiles
+
+The public `generation_profile` parameter selects only the skeleton generation prior/configuration. It does **not** change `metadata_mode`, does not upgrade humanoid trust, and does not bypass the humanoid quality gate.
+
+- `articulationxl` is the stable default and uses the upstream ArticulationXL skeleton task.
+- `vroid` is experimental. The wrapper generates run-local system and tokenizer config files under the current run directory, keeps the upstream `cls_token_id.vroid` class token, and deliberately removes exact VRoid skeleton-name enforcement from the generated tokenizer. This avoids an upstream inference path where UniRig can print `number of bones in required skeleton is more than existing bones`, return success, and write no `skeleton_stage.fbx`.
+
+The generated profile configs are deterministic runtime artifacts. They are not committed, and the staged upstream vendor configs are not mutated.
 
 ## Humanoid corpus profiling
 
@@ -92,7 +107,7 @@ This repository makes support claims only when there is **validated evidence**.
 
 | Host | Repo posture | Claim |
 | --- | --- | --- |
-| Windows x86_64 | Pinned prebuilt path validated with real install, rig, export, and Blender verification. | **Validated** for the current pinned prebuilt workflow in this repo. |
+| Windows x86_64 | Pinned prebuilt path validated with real install, rig, export, and Blender verification, including the current Modly validation of the experimental VRoid generation-profile path. | **Validated** for the current pinned prebuilt workflow in this repo. VRoid remains an experimental profile, not a separate blanket support claim. |
 | Linux x86_64 | Pinned prebuilt-first posture is documented. | **Unvalidated end-to-end** in this repo. Do not treat as fully supported. |
 | Linux ARM64 | Clean GitHub install plus a real rig workflow has now been validated on the tested Ubuntu 24.04 / aarch64 host, using a conservative `partial` runtime mode and the proven seam-backed subset. | **Validated on the tested host/workflow only.** This is still **not** a blanket platform support claim for other Linux ARM64 hosts. Other ARM64 hosts remain experimental until they are revalidated with the same level of evidence. |
 | Anything else | No repo evidence. | Unsupported until validated evidence exists. |
@@ -149,8 +164,10 @@ Implemented here:
 - public Modly process contract
 - pinned upstream runtime staging and reuse
 - readiness verification with actionable failures
+- Modly-visible stage progress and bounded actionable failure diagnostics
 - deterministic output naming and `.rigmeta.json` sidecar
 - sidecar-first humanoid metadata modes with fail-closed strict validation
+- `generation_profile` skeleton-prior selection with deterministic run-local VRoid config generation
 - diagnostic-only humanoid corpus profiling for family-level evidence reports
 - automated unit coverage for processor protocol, bootstrap/setup, and docs posture
 

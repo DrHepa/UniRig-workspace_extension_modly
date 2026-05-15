@@ -67,6 +67,35 @@ class DocsContractTests(unittest.TestCase):
             self.assertIn("fail closed", document)
             self.assertIn("fallback warning", document)
 
+    def test_docs_document_generation_profile_vroid_boundary(self) -> None:
+        readme = README.read_text(encoding="utf-8").lower()
+        architecture = ARCHITECTURE.read_text(encoding="utf-8").lower()
+
+        for document in (readme, architecture):
+            self.assertIn("generation_profile", document)
+            self.assertIn("articulationxl", document)
+            self.assertIn("vroid", document)
+            self.assertIn("experimental", document)
+            self.assertIn("run-local", document)
+            self.assertIn("tokenizer", document)
+            self.assertIn("cls_token_id.vroid", document)
+            self.assertIn("exact vroid skeleton-name enforcement", document)
+            self.assertIn("metadata_mode", document)
+
+    def test_docs_document_modly_visible_stage_diagnostics(self) -> None:
+        readme = README.read_text(encoding="utf-8").lower()
+        architecture = ARCHITECTURE.read_text(encoding="utf-8").lower()
+
+        for document in (readme, architecture):
+            self.assertIn("diagnostics:", document)
+            self.assertIn("error_code", document)
+            self.assertIn("expected_output", document)
+            self.assertIn("stage_log", document)
+            self.assertIn("stdout_tail", document)
+            self.assertIn("stderr_tail", document)
+            self.assertIn("extract-prepare", document)
+            self.assertIn("extract-skin", document)
+
     def test_docs_frame_linux_arm64_extract_merge_as_qualification_only(self) -> None:
         readme = README.read_text(encoding="utf-8")
         architecture = ARCHITECTURE.read_text(encoding="utf-8")

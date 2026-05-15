@@ -9,7 +9,7 @@ This repository is a **thin wrapper** that preserves Modly's public process boun
 1. `manifest.json` and `processor.py` keep the public Modly contract stable.
 2. `setup.py` acts as the wrapper's **planner/executor** for deterministic upstream staging, host-aware install planning, venv creation, preflight reporting, and readiness persistence.
 3. `bootstrap.ensure_ready()` verifies the staged runtime and returns actionable failures.
-4. `pipeline.run()` adapts Modly inputs to one deterministic upstream execution path.
+4. `pipeline.run()` adapts Modly inputs to one deterministic upstream execution path and emits Modly-visible stage logs.
 5. `metadata.write_sidecar()` writes the stable `.rigmeta.json` handoff beside the published mesh and appends the sidecar-first `humanoid_contract` when declared humanoid metadata is available.
 
 This is an **upstream-first** design: the wrapper does not own a second rigging policy engine.
@@ -74,9 +74,10 @@ The wrapper may explain which boundary failed, but it must not hide an environme
 2. `processor.py` validates the request, reads `input.filePath` plus top-level `workspaceDir` / `tempDir`, and calls `bootstrap.ensure_ready()`.
 3. `setup.py`/bootstrap guarantee the pinned upstream runtime is staged under `.unirig-runtime/vendor/unirig/`.
 4. `pipeline.run()` prepares deterministic input/output paths.
-5. Upstream UniRig commands perform extract → skeleton → skin → merge.
-6. The wrapper publishes the canonical `*_unirig.glb` to `workspaceDir/Workflows/` when `workspaceDir` is usable, writes the sidecar beside that canonical file, and emits Modly `done` with `done.result.filePath` pointing at the workspace artifact so `Add to Scene` recognizes it as workflow output.
-7. If `workspaceDir` is missing, empty, or not present on disk, publication falls back to the deterministic source-derived path from `input.filePath` for compatibility.
+5. `generation_profile` is resolved before skeleton inference. The default ArticulationXL profile delegates to the upstream task, while the experimental VRoid profile writes deterministic run-local config files without mutating the staged vendor checkout.
+6. Upstream UniRig commands perform extract → skeleton → skin → merge.
+7. The wrapper publishes the canonical `*_unirig.glb` to `workspaceDir/Workflows/` when `workspaceDir` is usable, writes the sidecar beside that canonical file, and emits Modly `done` with `done.result.filePath` pointing at the workspace artifact so `Add to Scene` recognizes it as workflow output.
+8. If `workspaceDir` is missing, empty, or not present on disk, publication falls back to the deterministic source-derived path from `input.filePath` for compatibility.
 
 Canonical publication rules:
 
@@ -84,6 +85,21 @@ Canonical publication rules:
 - The sidecar lives beside the canonical published output, not beside the temporary run directory.
 - `done.result.filePath` must report the canonical published artifact, not an implementation-internal temp path.
 - On Linux ARM64, any mirror back onto the original input path is secondary compatibility behavior only; it does not change the canonical workspace artifact or the reported `done.result.filePath`.
+
+## Runtime diagnostics boundary
+
+The process protocol stays intentionally small: stdout events remain `progress`, `log`, `done`, and `error`. The wrapper uses `log` events to expose stage starts for `extract-prepare`, `skeleton`, `extract-skin`, `skin`, and `merge` in Modly while keeping implementation commands and runtime internals out of normal progress messages.
+
+When a stage fails or reports success without writing its expected output, the wrapper raises a public error whose message contains a bounded `Diagnostics:` block. The block includes `run_id`, `stage`, `error_code`, `expected_output`, `stage_log`, `stdout_tail`, `stderr_tail`, and the upstream return code field. This is UI-oriented triage data, not a replacement for the full persisted stage log.
+
+## Generation profile boundary
+
+`generation_profile` is a skeleton-generation selector only. It does not change publication, `metadata_mode`, humanoid trust, or quality-gate semantics.
+
+- `articulationxl` is the stable default and uses the upstream ArticulationXL skeleton task directly.
+- `vroid` is experimental and generates run-local system/tokenizer config files for the current run. The generated system config sets the VRoid class prior, and the generated tokenizer keeps `cls_token_id.vroid` while removing exact VRoid skeleton-name enforcement from `order_config.skeleton_path`. That prevents the upstream exact-name assertion path from producing an empty prediction and a missing `skeleton_stage.fbx` despite a zero process return code.
+
+The staged upstream checkout remains read-only from the wrapper's perspective. Generated profile config files live under the run directory and are runtime artifacts, not source files.
 
 Humanoid contract rules:
 
@@ -123,6 +139,7 @@ This boundary is deliberate. Corpus reports help prevent GLB-by-GLB patching, bu
 - `processor.py` — JSON-line protocol adapter
 - `setup.py` — deterministic staging, install, preflight, and readiness writer
 - `src/unirig_ext/bootstrap.py` — minimal runtime-state normalization and readiness verification
+- `src/unirig_ext/generation_profile.py` — bounded skeleton generation-profile resolver and run-local VRoid config generation
 - `src/unirig_ext/pipeline.py` — deterministic upstream command adapter
 - `src/unirig_ext/io.py` — input validation, staging, and output publication
 - `src/unirig_ext/metadata.py` — sidecar writer with stable runtime facts and optional humanoid contract enrichment
@@ -137,7 +154,7 @@ Support claims must be backed by **validated evidence**.
 
 | Host | Evidence in this repo | Public claim |
 | --- | --- | --- |
-| Windows x86_64 | Pinned prebuilt checks, unit coverage, and a real install → rig → export flow verified in Blender | Validated for the current pinned prebuilt workflow |
+| Windows x86_64 | Pinned prebuilt checks, unit coverage, a real install → rig → export flow verified in Blender, and current Modly validation of the experimental VRoid generation-profile path | Validated for the current pinned prebuilt workflow; VRoid remains experimental profile evidence, not a separate blanket support claim |
 | Linux x86_64 | Prebuilt-first docs and unit coverage | Conservative existing posture: unvalidated end-to-end; not fully supported |
 | Linux ARM64 | Clean-install + real-workflow validation on the tested host, planner-backed staged bringup, guarded `spconv` import-smoke evidence when verified, external Blender evidence, and a recovered partial subset for `extract-prepare`, `skeleton`, `extract-skin`, `skin`, and `merge` | Validated on the tested host/workflow only; still experimental as a general ARM64 platform claim |
 | Other hosts | No evidence | Unsupported until validated evidence exists |
