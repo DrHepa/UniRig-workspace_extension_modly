@@ -28,6 +28,7 @@ REJECTED_GENERATION_PASSTHROUGH_KEYS = frozenset(
 ARTICULATIONXL_SKELETON_TASK = "configs/task/quick_inference_skeleton_articulationxl_ar_256.yaml"
 VROID_GENERATED_CONFIG_RELATIVE = Path("generation_profiles") / "vroid_skeleton_task.yaml"
 VROID_GENERATED_SYSTEM_RELATIVE = Path("generation_profiles") / "vroid_ar_inference_articulationxl.yaml"
+VROID_GENERATED_TOKENIZER_RELATIVE = Path("generation_profiles") / "vroid_tokenizer_parts_articulationxl_256.yaml"
 UPSTREAM_SYSTEM_CONFIG_DIR = Path("configs/system")
 UPSTREAM_TOKENIZER_CONFIG_DIR = Path("configs/tokenizer")
 
@@ -172,15 +173,21 @@ def _resolve_vroid_profile(*, context: RuntimeContext, run_dir: Path) -> Generat
 
     generated_system = copy.deepcopy(system_source)
     generated_system["generate_kwargs"]["assign_cls"] = VROID_PROFILE
+    generated_tokenizer = copy.deepcopy(tokenizer_source)
+    del generated_tokenizer["order_config"]["skeleton_path"][VROID_PROFILE]
 
     generated_task = copy.deepcopy(task_source)
     generated_system_path = run_dir / VROID_GENERATED_SYSTEM_RELATIVE
+    generated_tokenizer_path = run_dir / VROID_GENERATED_TOKENIZER_RELATIVE
     generated_task_path = run_dir / VROID_GENERATED_CONFIG_RELATIVE
     generated_system_path.parent.mkdir(parents=True, exist_ok=True)
     rendered_system = json.dumps(generated_system, indent=2, sort_keys=True) + "\n"
     generated_system_path.write_text(rendered_system, encoding="utf-8")
+    rendered_tokenizer = json.dumps(generated_tokenizer, indent=2, sort_keys=True) + "\n"
+    generated_tokenizer_path.write_text(rendered_tokenizer, encoding="utf-8")
 
     generated_task["components"]["system"] = _component_reference_for_system(generated_system_path, context=context)
+    generated_task["components"]["tokenizer"] = _component_reference_for_tokenizer(generated_tokenizer_path, context=context)
     rendered = json.dumps(generated_task, indent=2, sort_keys=True) + "\n"
     generated_task_path.parent.mkdir(parents=True, exist_ok=True)
     generated_task_path.write_text(rendered, encoding="utf-8")
@@ -272,6 +279,15 @@ def _component_reference_for_system(generated_system_path: Path, *, context: Run
         reference = generated_system_path.with_suffix("").relative_to(system_config_dir)
     except ValueError:
         reference = Path(_relative_path(generated_system_path.with_suffix(""), system_config_dir))
+    return reference.as_posix()
+
+
+def _component_reference_for_tokenizer(generated_tokenizer_path: Path, *, context: RuntimeContext) -> str:
+    tokenizer_config_dir = context.unirig_dir / UPSTREAM_TOKENIZER_CONFIG_DIR
+    try:
+        reference = generated_tokenizer_path.with_suffix("").relative_to(tokenizer_config_dir)
+    except ValueError:
+        reference = Path(_relative_path(generated_tokenizer_path.with_suffix(""), tokenizer_config_dir))
     return reference.as_posix()
 
 
