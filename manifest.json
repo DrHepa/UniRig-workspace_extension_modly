@@ -3,7 +3,7 @@
   "name": "UniRig Process Extension",
   "type": "process",
   "entry": "processor.py",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "author": "DrHepa",
   "description": "Upstream-native UniRig process scaffold for Modly workflows.",
   "nodes": [
