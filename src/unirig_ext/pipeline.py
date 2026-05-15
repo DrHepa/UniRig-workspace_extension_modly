@@ -136,6 +136,7 @@ def _run_real_pipeline(
     staged_files = [stage.runtime_input_path for stage in plan if stage.runtime_input_path is not None]
 
     try:
+        log("running extract-prepare stage")
         shutil.copy2(prepared, _require_runtime_input_path(plan[0]))
         _run_stage(plan[0], context=context, run_dir=run_dir)
         progress(35, "prepare/extract complete")
@@ -145,6 +146,7 @@ def _run_real_pipeline(
         progress(55, "skeleton stage complete")
 
         shutil.copy2(plan[1].success_path, _require_runtime_input_path(plan[2]))
+        log("running extract-skin stage")
         _run_stage(plan[2], context=context, run_dir=run_dir)
         log("running skin stage")
         _run_stage(plan[3], context=context, run_dir=run_dir)
@@ -813,20 +815,29 @@ def _run_command(
             check=False,
         )
     except OSError as exc:
+        result = subprocess.CompletedProcess(command, returncode=-1, stdout="", stderr=str(exc))
         log_path = _write_stage_log(
             command=command,
             cwd=cwd,
-            result=subprocess.CompletedProcess(command, returncode=-1, stdout="", stderr=str(exc)),
+            result=result,
             run_dir=run_dir,
             stage_name=log_stage_name or stage_name,
             success_path=success_path,
             tolerated_windows_crash=False,
         )
         raise PipelineError(
-            f"UniRig {stage_name} stage could not start. Command: {' '.join(command)}\n"
+            f"UniRig {stage_name} stage failed (launch-failed). Command: {' '.join(command)}\n"
             f"Expected output: {success_path}\n"
             f"Stage log: {log_path}\n"
-            f"Details: {exc}"
+            f"Details: could not start: {exc}",
+            diagnostic=_build_wrapper_stage_failure_diagnostic(
+                run_dir=run_dir,
+                stage_name=stage_name,
+                error_code="launch-failed",
+                success_path=success_path,
+                log_path=log_path,
+                result=result,
+            ),
         ) from exc
     tolerated_windows_crash = _should_tolerate_windows_native_access_violation(
         result=result,
@@ -845,12 +856,59 @@ def _run_command(
     if (result.returncode == 0 or tolerated_windows_crash) and success_path.exists():
         return
     detail = _tail_summary(result)
+    error_code = _wrapper_stage_error_code(result=result, context=context, success_path=success_path)
     raise PipelineError(
-        f"UniRig {stage_name} stage failed with exit code {result.returncode}. Command: {' '.join(command)}\n"
+        f"UniRig {stage_name} stage failed ({error_code}) with exit code {result.returncode}. Command: {' '.join(command)}\n"
         f"Expected output: {success_path}\n"
         f"Stage log: {log_path}\n"
-        f"Tail: {detail}"
+        f"Tail: {detail}",
+        diagnostic=_build_wrapper_stage_failure_diagnostic(
+            run_dir=run_dir,
+            stage_name=stage_name,
+            error_code=error_code,
+            success_path=success_path,
+            log_path=log_path,
+            result=result,
+        ),
     )
+
+
+def _build_wrapper_stage_failure_diagnostic(
+    *,
+    run_dir: Path,
+    stage_name: str,
+    error_code: str,
+    success_path: Path,
+    log_path: Path,
+    result: subprocess.CompletedProcess[str],
+) -> StageFailureDiagnostic:
+    return StageFailureDiagnostic(
+        run_id=run_dir.name,
+        stage=stage_name,
+        error_code=error_code,
+        original_input=UNAVAILABLE,
+        staged_input=UNAVAILABLE,
+        runtime_input=UNAVAILABLE,
+        expected_output=str(success_path),
+        result_json=UNAVAILABLE,
+        stage_log=str(log_path),
+        stdout_tail=bounded_stream_tail(result.stdout),
+        stderr_tail=bounded_stream_tail(result.stderr),
+        blender_returncode=result.returncode,
+    )
+
+
+def _wrapper_stage_error_code(
+    *,
+    result: subprocess.CompletedProcess[str],
+    context: RuntimeContext | None,
+    success_path: Path,
+) -> str:
+    if _is_windows_native_access_violation(result=result, context=context):
+        return "windows-native-access-violation"
+    if result.returncode == 0 and not success_path.exists():
+        return "expected-output-missing"
+    return "stage-failed"
 
 
 def _write_stage_log(
@@ -892,11 +950,15 @@ def _should_tolerate_windows_native_access_violation(
     context: RuntimeContext | None,
     success_path: Path,
 ) -> bool:
+    return _is_windows_native_access_violation(result=result, context=context) and success_path.exists()
+
+
+def _is_windows_native_access_violation(*, result: subprocess.CompletedProcess[str], context: RuntimeContext | None) -> bool:
     if context is None:
         return False
     host = context.platform_policy.get("host") if isinstance(context.platform_policy, dict) else None
     host_os = str((host or {}).get("os") or "").strip().lower()
-    return host_os == "windows" and result.returncode in WINDOWS_NATIVE_ACCESS_VIOLATION_CODES and success_path.exists()
+    return host_os == "windows" and result.returncode in WINDOWS_NATIVE_ACCESS_VIOLATION_CODES
 
 
 def _stage_log_path(*, run_dir: Path, stage_name: str) -> Path:

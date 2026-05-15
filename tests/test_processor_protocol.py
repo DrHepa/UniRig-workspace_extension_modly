@@ -21,8 +21,11 @@ ROOT = Path(__file__).resolve().parents[1]
 PROCESSOR = ROOT / "processor.py"
 MANIFEST = ROOT / "manifest.json"
 SRC = ROOT / "src"
+TESTS = ROOT / "tests"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
+if str(TESTS) not in sys.path:
+    sys.path.insert(0, str(TESTS))
 
 from unirig_ext import blender_bridge, bootstrap, pipeline
 from unirig_ext.bootstrap import RuntimeContext
@@ -563,7 +566,11 @@ class ProcessorProtocolTests(unittest.TestCase):
         messages = [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
         self.assertTrue(messages, msg="processor emitted no protocol messages")
         self.assertTrue({message["type"] for message in messages}.issubset({"progress", "log", "done", "error"}))
+        self.assertTrue(any(message.get("message", "") == "running extract-prepare stage" for message in messages if message["type"] == "log"))
         self.assertTrue(any(message.get("message", "") == "running skeleton stage" for message in messages if message["type"] == "log"))
+        self.assertTrue(any(message.get("message", "") == "running extract-skin stage" for message in messages if message["type"] == "log"))
+        self.assertTrue(any(message.get("message", "") == "running skin stage" for message in messages if message["type"] == "log"))
+        self.assertTrue(any(message.get("message", "") == "running merge stage" for message in messages if message["type"] == "log"))
         self.assertFalse(any("run.py" in message.get("message", "") for message in messages if message["type"] == "log"))
         self.assertFalse(any("src.data.extract" in message.get("message", "") for message in messages if message["type"] == "log"))
         self.assertFalse(any(".unirig-runtime" in message.get("message", "") for message in messages if message["type"] == "log"))
@@ -1205,6 +1212,22 @@ class PipelineGuardrailTests(unittest.TestCase):
         self.assertIn("stderr_tail=", message)
         self.assertIn("blender_returncode=", message)
 
+    def _assert_wrapper_stage_public_error_contract(self, exc: pipeline.PipelineError, *, stage_name: str, error_code: str) -> None:
+        message = pipeline.public_error_message(exc)
+        self.assertTrue(message.startswith(f"UniRig {stage_name} stage failed. Inspect extension runtime logs for details."))
+        self.assertIn(f"stage={stage_name}", message)
+        self.assertIn(f"error_code={error_code}", message)
+        self.assertIn(f"run_id={self.run_dir.name}", message)
+        self.assertIn("original_input=<unavailable>", message)
+        self.assertIn("staged_input=<unavailable>", message)
+        self.assertIn("runtime_input=<unavailable>", message)
+        self.assertIn("expected_output=", message)
+        self.assertIn("result_json=<unavailable>", message)
+        self.assertIn("stage_log=", message)
+        self.assertIn("stdout_tail=", message)
+        self.assertIn("stderr_tail=", message)
+        self.assertIn("blender_returncode=", message)
+
     def test_public_error_message_formats_structured_stage_diagnostic(self) -> None:
         diagnostic = pipeline.StageFailureDiagnostic(
             run_id="run-synthetic",
@@ -1346,7 +1369,7 @@ class PipelineGuardrailTests(unittest.TestCase):
     def test_run_command_fails_when_process_exits_nonzero_even_if_output_exists(self) -> None:
         output_path = self.temp_dir / "stage-output.bin"
         output_path.write_bytes(b"partial")
-        result = subprocess.CompletedProcess(args=["fake"], returncode=7, stdout="", stderr="boom")
+        result = subprocess.CompletedProcess(args=["fake"], returncode=7, stdout="processed line\n", stderr="boom")
 
         with mock.patch("unirig_ext.pipeline.subprocess.run", return_value=result):
             with self.assertRaises(pipeline.PipelineError) as ctx:
@@ -1369,6 +1392,35 @@ class PipelineGuardrailTests(unittest.TestCase):
         self.assertIn(str(output_path), str(ctx.exception))
         self.assertIn(str(log_path), str(ctx.exception))
         self.assertIn("boom", str(ctx.exception))
+        self._assert_wrapper_stage_public_error_contract(ctx.exception, stage_name="skin", error_code="stage-failed")
+        public_message = pipeline.public_error_message(ctx.exception)
+        self.assertIn("stdout_tail=processed line", public_message)
+        self.assertIn("stderr_tail=boom", public_message)
+        self.assertIn("blender_returncode=7", public_message)
+
+    def test_run_command_reports_missing_expected_output_with_success_returncode_as_public_diagnostic(self) -> None:
+        output_path = self.temp_dir / "missing-output.bin"
+        result = subprocess.CompletedProcess(args=["fake"], returncode=0, stdout="stage says done", stderr="warning from runtime")
+
+        with mock.patch("unirig_ext.pipeline.subprocess.run", return_value=result):
+            with self.assertRaises(pipeline.PipelineError) as ctx:
+                pipeline._run_command(
+                    ["fake"],
+                    cwd=self.temp_dir,
+                    context=self.context,
+                    success_path=output_path,
+                    run_dir=self.run_dir,
+                    stage_name="extract-skin",
+                    log_stage_name="extract-skin",
+                )
+
+        self._assert_wrapper_stage_public_error_contract(ctx.exception, stage_name="extract-skin", error_code="expected-output-missing")
+        public_message = pipeline.public_error_message(ctx.exception)
+        self.assertIn(f"expected_output={output_path}", public_message)
+        self.assertIn(f"stage_log={self._stage_log_path('extract-skin')}", public_message)
+        self.assertIn("stdout_tail=stage says done", public_message)
+        self.assertIn("stderr_tail=warning from runtime", public_message)
+        self.assertIn("blender_returncode=0", public_message)
 
     def test_run_command_tolerates_windows_native_access_violation_for_extract_prepare_when_output_exists(self) -> None:
         output_path = self.temp_dir / "skeleton_npz" / "input" / pipeline.SKIN_DATA_NAME
@@ -1421,6 +1473,8 @@ class PipelineGuardrailTests(unittest.TestCase):
         self.assertIn(str(output_path), str(ctx.exception))
         self.assertIn(str(log_path), str(ctx.exception))
         self.assertIn("tolerated_windows_native_access_violation: false", log_path.read_text(encoding="utf-8"))
+        self._assert_wrapper_stage_public_error_contract(ctx.exception, stage_name="extract-prepare", error_code="windows-native-access-violation")
+        self.assertIn("stderr_tail=native crash before write", pipeline.public_error_message(ctx.exception))
 
     def test_run_command_uses_windows_runtime_dll_path_shim(self) -> None:
         context = self._context(host_os="windows")
@@ -1490,6 +1544,9 @@ class PipelineGuardrailTests(unittest.TestCase):
         self.assertIn("could not start", str(ctx.exception))
         self.assertIn(str(log_path), str(ctx.exception))
         self.assertIn("missing python", log_path.read_text(encoding="utf-8"))
+        self._assert_wrapper_stage_public_error_contract(ctx.exception, stage_name="skeleton", error_code="launch-failed")
+        self.assertIn("stderr_tail=missing python", pipeline.public_error_message(ctx.exception))
+        self.assertIn("blender_returncode=-1", pipeline.public_error_message(ctx.exception))
 
     def test_build_execution_plan_returns_deterministic_upstream_stage_specs(self) -> None:
         mesh_path = self.temp_dir / "mesh.glb"
